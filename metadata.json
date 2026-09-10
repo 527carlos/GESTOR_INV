@@ -1,0 +1,6 @@
+{
+  "name": "Service Portal PrintTech",
+  "description": "Portal de servicio técnico de PrintTech con gestión de casos, biblioteca de instructivos, capacitación y sincronización con Google Sheets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
