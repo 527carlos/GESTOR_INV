@@ -87,6 +87,9 @@
 
     function getActiveUser() {
       if (!APP.data) return null;
+      if (!APP.data.users || APP.data.users.length === 0) {
+        throw new Error('La pestaña "Usuarios" de la hoja de cálculo está vacía. Ejecuta initializeSpreadsheet desde el editor de Apps Script.');
+      }
       var found = APP.data.users.filter(function (u) { return u.id === APP.data.activeUserId; })[0];
       return found || APP.data.users[0];
     }
@@ -127,11 +130,37 @@
       }).catch(function (err) {
         console.error('Error cargando datos:', err);
         APP.isSyncing = false;
+        renderLoadError(err);
       });
     }
 
     function handleSyncNow() {
       loadData(true);
+    }
+
+    function retryLoad() {
+      byId('root').innerHTML = loadingScreenHtml();
+      refreshIcons();
+      loadData(true);
+    }
+
+    function errorMessageOf_(err) {
+      if (!err) return 'Error desconocido.';
+      if (typeof err === 'string') return err;
+      return err.message || String(err);
+    }
+
+    function renderLoadError(err) {
+      var root = byId('root');
+      root.innerHTML = '' +
+        '<div class="min-h-screen bg-slate-950 flex flex-col items-center justify-center gap-4 text-slate-200 p-6">' +
+          '<i data-lucide="alert-triangle" class="w-10 h-10 text-rose-400"></i>' +
+          '<p class="font-bold text-sm tracking-wide uppercase text-center">No se pudo cargar la base de datos</p>' +
+          '<p class="text-xs text-slate-400 max-w-md text-center font-mono bg-slate-900 border border-slate-800 rounded-xl p-3">' + esc(errorMessageOf_(err)) + '</p>' +
+          '<p class="text-[11px] text-slate-500 max-w-md text-center">Revisa que la función <b>initializeSpreadsheet</b> se haya ejecutado al menos una vez desde el editor de Apps Script y que la cuenta con la que se desplegó tenga acceso a la hoja de cálculo.</p>' +
+          '<button onclick="retryLoad()" class="mt-2 bg-sky-500 hover:bg-sky-600 text-white px-5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer"><i data-lucide="refresh-cw" class="w-4 h-4"></i>Reintentar</button>' +
+        '</div>';
+      refreshIcons();
     }
 
     // -----------------------------------------------------------------------
@@ -141,12 +170,18 @@
       var root = byId('root');
       if (!APP.data) {
         root.innerHTML = loadingScreenHtml();
+        refreshIcons();
         return;
       }
-      root.innerHTML = layoutHtml();
-      renderMainContent();
-      renderModals();
-      refreshIcons();
+      try {
+        root.innerHTML = layoutHtml();
+        renderMainContent();
+        renderModals();
+        refreshIcons();
+      } catch (err) {
+        console.error('Error al renderizar la interfaz:', err);
+        renderLoadError(err);
+      }
     }
 
     function setActiveTab(tab) {

@@ -59,8 +59,16 @@ function getOrCreateSheet_(ss, name, headers) {
     sheet.appendRow(headers);
     sheet.setFrozenRows(1);
     sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
+    // Formato de texto plano para las filas de datos: evita que Sheets
+    // reinterprete automáticamente valores como fechas o números
+    // (p.ej. "OCT 12, 2023" o IDs con formato especial).
+    sheet.getRange(2, 1, Math.max(sheet.getMaxRows() - 1, 1), headers.length).setNumberFormat('@');
   }
   return sheet;
+}
+
+function isSheetEmpty_(sheet) {
+  return sheet.getLastRow() < 2;
 }
 
 function readTable_(sheet, headers) {
@@ -126,9 +134,6 @@ function writeKeyValue_(sheet, obj) {
 
 function ensureSetup_() {
   var ss = getSS_();
-  var casosSheet = ss.getSheetByName(SHEET_NAMES.CASOS);
-  var alreadySeeded = casosSheet && casosSheet.getLastRow() > 1;
-
   var casos = getOrCreateSheet_(ss, SHEET_NAMES.CASOS, CASOS_HEADERS);
   var historial = getOrCreateSheet_(ss, SHEET_NAMES.HISTORIAL, HISTORIAL_HEADERS);
   var manuales = getOrCreateSheet_(ss, SHEET_NAMES.MANUALES, MANUALES_HEADERS);
@@ -138,9 +143,67 @@ function ensureSetup_() {
   var reglas = getOrCreateSheet_(ss, SHEET_NAMES.REGLAS, REGLAS_HEADERS);
   var logsSync = getOrCreateSheet_(ss, SHEET_NAMES.LOGS_SYNC, LOGS_SYNC_HEADERS);
 
-  if (alreadySeeded) return;
-
   var now = Date.now();
+
+  // Cada tabla se siembra de forma independiente e idempotente: si una
+  // ejecución previa falló a la mitad (timeout, error transitorio de
+  // Sheets, etc.) las tablas que ya tenían datos no bloquean el sembrado
+  // de las que quedaron vacías.
+
+  if (isSheetEmpty_(usuarios)) {
+    writeTable_(usuarios, USUARIOS_HEADERS, [
+      { id: 'user-1', name: 'Admin Tech', role: 'Admin Tech', level: 'Level 4 Technician', avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80' },
+      { id: 'user-2', name: 'Técnico Nvl 3', role: 'Técnico Nvl 3', level: 'Level 3 Technician', avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=150&q=80' },
+      { id: 'user-3', name: 'Técnico Nvl 1', role: 'Técnico Nvl 1', level: 'Level 1 Technician', avatar: 'https://images.unsplash.com/photo-1628157582853-a796fa650a6a?auto=format&fit=crop&w=150&q=80' }
+    ]);
+  }
+
+  if (isSheetEmpty_(config)) {
+    writeKeyValue_(config, {
+      activeUserId: 'user-1',
+      spreadsheetId: SPREADSHEET_ID,
+      sheetName: SHEET_NAMES.CASOS,
+      range: 'A2:H',
+      apiKey: '',
+      autoSyncEnabled: true
+    });
+  }
+
+  if (isSheetEmpty_(reglas)) {
+    writeKeyValue_(reglas, {
+      caseIdRegex: '^#[0-9]{5}-[A-Z]$',
+      minClientLength: 3,
+      allowSpecialCharsInClient: false,
+      requireModelSelection: true,
+      requireDescription: true
+    });
+  }
+
+  if (isSheetEmpty_(manuales)) {
+    writeTable_(manuales, MANUALES_HEADERS, [
+      { id: 'MAN-001', title: 'Manual de Servicio Pro-Series 500', description: 'Inyección de Tinta Industrial - Revisión 2024.2', type: 'Inyección de Tinta', difficulty: 'HARD', date: 'OCT 12, 2023', views: 1240, downloadUrl: '#', image: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=400&q=80' },
+      { id: 'MAN-002', title: 'Guía de Configuración LaserJet X9', description: 'Láser Monocromático - Protocolos de Red', type: 'Láser', difficulty: 'EASY', date: 'NOV 05, 2023', views: 850, downloadUrl: '#', image: 'https://images.unsplash.com/photo-1588508065123-287b28e013da?auto=format&fit=crop&w=400&q=80' },
+      { id: 'MAN-003', title: 'Planos de Ensamblaje Wide-Format G3', description: 'Gran Formato - Esquemas Hidráulicos', type: 'Gran Formato', difficulty: 'MEDIUM', date: 'SEP 28, 2023', views: 420, downloadUrl: '#', image: 'https://images.unsplash.com/photo-1581091226825-a6a2a5aee158?auto=format&fit=crop&w=400&q=80' },
+      { id: 'MAN-004', title: 'Mantenimiento Preventivo Thermal-Z', description: 'Térmicas - Limpieza de Cabezales', type: 'Térmicas', difficulty: 'MEDIUM', date: 'OCT 30, 2023', views: 310, downloadUrl: '#', image: 'https://images.unsplash.com/photo-1531403009284-440f080d1e12?auto=format&fit=crop&w=400&q=80' }
+    ]);
+  }
+
+  if (isSheetEmpty_(cursos)) {
+    writeTable_(cursos, CURSOS_HEADERS, [
+      { id: 'CRS-001', title: 'Fundamentos de Impresión 3D', description: 'Fundamentos básicos y calibración física para boquillas FDM/SLA.', duration: '12h', modulesCount: 8, progress: 80, completed: false, image: 'https://images.unsplash.com/photo-1581092160607-ee22621dd758?auto=format&fit=crop&w=400&q=80' },
+      { id: 'CRS-002', title: 'Electrónica de Plóters', description: 'Manejo de firmware, diagnóstico de drivers de motores de paso y conectividad serial.', duration: '18h', modulesCount: 12, progress: 0, completed: false, image: 'https://images.unsplash.com/photo-1517055720413-77a2702f583a?auto=format&fit=crop&w=400&q=80' },
+      { id: 'CRS-003', title: 'Mantenimiento Preventivo Nivel 1', description: 'Lubricación de rieles, calibración de tensión de bandas e inspección de filtros.', duration: '6h', modulesCount: 4, progress: 0, completed: false, image: 'https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=400&q=80' }
+    ]);
+  }
+
+  if (isSheetEmpty_(logsSync)) {
+    writeTable_(logsSync, LOGS_SYNC_HEADERS, [
+      { timestamp: now - 5000, level: 'success', message: 'Inicializado canal de sincronización con Google Sheets.' },
+      { timestamp: now - 4000, level: 'info', message: 'Base de datos conectada al Spreadsheet ID: ' + SPREADSHEET_ID }
+    ]);
+  }
+
+  if (!isSheetEmpty_(casos)) return;
 
   var seedCases = [
     {
@@ -181,50 +244,6 @@ function ensureSetup_() {
     { caseId: '#77395-X', timestamp: now - 2 * 60 * 60000, user: 'Técnico Nvl 3', action: 'Creado', detail: 'Reportado cortocircuito en placa principal' }
   ];
   writeTable_(historial, HISTORIAL_HEADERS, seedHistory);
-
-  var seedManuals = [
-    { id: 'MAN-001', title: 'Manual de Servicio Pro-Series 500', description: 'Inyección de Tinta Industrial - Revisión 2024.2', type: 'Inyección de Tinta', difficulty: 'HARD', date: 'OCT 12, 2023', views: 1240, downloadUrl: '#', image: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=400&q=80' },
-    { id: 'MAN-002', title: 'Guía de Configuración LaserJet X9', description: 'Láser Monocromático - Protocolos de Red', type: 'Láser', difficulty: 'EASY', date: 'NOV 05, 2023', views: 850, downloadUrl: '#', image: 'https://images.unsplash.com/photo-1588508065123-287b28e013da?auto=format&fit=crop&w=400&q=80' },
-    { id: 'MAN-003', title: 'Planos de Ensamblaje Wide-Format G3', description: 'Gran Formato - Esquemas Hidráulicos', type: 'Gran Formato', difficulty: 'MEDIUM', date: 'SEP 28, 2023', views: 420, downloadUrl: '#', image: 'https://images.unsplash.com/photo-1581091226825-a6a2a5aee158?auto=format&fit=crop&w=400&q=80' },
-    { id: 'MAN-004', title: 'Mantenimiento Preventivo Thermal-Z', description: 'Térmicas - Limpieza de Cabezales', type: 'Térmicas', difficulty: 'MEDIUM', date: 'OCT 30, 2023', views: 310, downloadUrl: '#', image: 'https://images.unsplash.com/photo-1531403009284-440f080d1e12?auto=format&fit=crop&w=400&q=80' }
-  ];
-  writeTable_(manuales, MANUALES_HEADERS, seedManuals);
-
-  var seedCourses = [
-    { id: 'CRS-001', title: 'Fundamentos de Impresión 3D', description: 'Fundamentos básicos y calibración física para boquillas FDM/SLA.', duration: '12h', modulesCount: 8, progress: 80, completed: false, image: 'https://images.unsplash.com/photo-1581092160607-ee22621dd758?auto=format&fit=crop&w=400&q=80' },
-    { id: 'CRS-002', title: 'Electrónica de Plóters', description: 'Manejo de firmware, diagnóstico de drivers de motores de paso y conectividad serial.', duration: '18h', modulesCount: 12, progress: 0, completed: false, image: 'https://images.unsplash.com/photo-1517055720413-77a2702f583a?auto=format&fit=crop&w=400&q=80' },
-    { id: 'CRS-003', title: 'Mantenimiento Preventivo Nivel 1', description: 'Lubricación de rieles, calibración de tensión de bandas e inspección de filtros.', duration: '6h', modulesCount: 4, progress: 0, completed: false, image: 'https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=400&q=80' }
-  ];
-  writeTable_(cursos, CURSOS_HEADERS, seedCourses);
-
-  var seedUsers = [
-    { id: 'user-1', name: 'Admin Tech', role: 'Admin Tech', level: 'Level 4 Technician', avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80' },
-    { id: 'user-2', name: 'Técnico Nvl 3', role: 'Técnico Nvl 3', level: 'Level 3 Technician', avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=150&q=80' },
-    { id: 'user-3', name: 'Técnico Nvl 1', role: 'Técnico Nvl 1', level: 'Level 1 Technician', avatar: 'https://images.unsplash.com/photo-1628157582853-a796fa650a6a?auto=format&fit=crop&w=150&q=80' }
-  ];
-  writeTable_(usuarios, USUARIOS_HEADERS, seedUsers);
-
-  writeKeyValue_(config, {
-    activeUserId: 'user-1',
-    spreadsheetId: SPREADSHEET_ID,
-    sheetName: SHEET_NAMES.CASOS,
-    range: 'A2:H',
-    apiKey: '',
-    autoSyncEnabled: true
-  });
-
-  writeKeyValue_(reglas, {
-    caseIdRegex: '^#[0-9]{5}-[A-Z]$',
-    minClientLength: 3,
-    allowSpecialCharsInClient: false,
-    requireModelSelection: true,
-    requireDescription: true
-  });
-
-  writeTable_(logsSync, LOGS_SYNC_HEADERS, [
-    { timestamp: now - 5000, level: 'success', message: 'Inicializado canal de sincronización con Google Sheets.' },
-    { timestamp: now - 4000, level: 'info', message: 'Base de datos conectada al Spreadsheet ID: ' + SPREADSHEET_ID }
-  ]);
 }
 
 /** Ejecutar manualmente una vez desde el editor de Apps Script para inicializar la hoja. */
@@ -301,7 +320,17 @@ function removeHistoryForCase_(ss, caseId) {
 
 function readManualsRaw_(ss) {
   var rows = readTable_(getOrCreateSheet_(ss, SHEET_NAMES.MANUALES, MANUALES_HEADERS), MANUALES_HEADERS);
-  rows.forEach(function (m) { m.views = Number(m.views || 0); });
+  rows.forEach(function (m) {
+    m.views = Number(m.views || 0);
+    // Si Sheets llegó a interpretar la columna "date" como fecha real
+    // (p.ej. celdas creadas antes del formato de texto plano), la
+    // devolvemos como texto legible en vez de un objeto Date crudo.
+    if (Object.prototype.toString.call(m.date) === '[object Date]') {
+      m.date = Utilities.formatDate(m.date, Session.getScriptTimeZone(), 'MMM dd, yyyy').toUpperCase();
+    } else if (m.date !== undefined && m.date !== null) {
+      m.date = String(m.date);
+    }
+  });
   return rows;
 }
 
