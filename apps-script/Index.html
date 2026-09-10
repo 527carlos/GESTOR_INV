@@ -1,0 +1,1193 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ISERA Portal - PrintTech Systems</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+  <style>
+    html, body { height: 100%; }
+    body {
+      font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+      background-color: #080c14;
+      color: #e2e8f0;
+      -webkit-font-smoothing: antialiased;
+      background-image: radial-gradient(rgba(56, 189, 248, 0.03) 1px, transparent 0);
+      background-size: 24px 24px;
+      margin: 0;
+    }
+    .font-mono { font-family: 'JetBrains Mono', monospace; }
+    .custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 9999px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #334155; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+    .animate-fade-in { animation: fadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+    input[type="range"].accent-sky-500 { accent-color: #0ea5e9; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script>
+    // -----------------------------------------------------------------------
+    // Constants
+    // -----------------------------------------------------------------------
+    var PRINTER_MODELS = [
+      'Plotter Z-Series X1', 'LaserJet Pro M501', 'Indico 12000 Press', 'Latex 365 Printer',
+      'Eco-Jet Desktop v3', 'Plotter Master 8000', 'Industrial Line P-Series', 'Thermal-Z'
+    ];
+    var NAV_ITEMS = [
+      { id: 'dashboard', label: 'Dashboard', icon: 'layout-dashboard' },
+      { id: 'library', label: 'Instructivos', icon: 'book-open' },
+      { id: 'training', label: 'Capacitación', icon: 'graduation-cap' },
+      { id: 'cases', label: 'Gestión de Casos', icon: 'sliders-horizontal' },
+      { id: 'settings', label: 'Sheets & Roles', icon: 'settings' }
+    ];
+    var LIBRARY_CATEGORIES = ['Todos', 'Inyección de Tinta', 'Láser', 'Gran Formato', 'Térmicas'];
+
+    // -----------------------------------------------------------------------
+    // App state
+    // -----------------------------------------------------------------------
+    var APP = {
+      data: null,
+      activeTab: 'dashboard',
+      isSyncing: false,
+      editingCase: null,       // {isNew:true} or a full case object
+      formError: '',
+      isSubmitting: false,
+      inspectingLogsCase: null,
+      library: { selectedType: 'Todos', search: '', downloadingManual: null },
+      training: { selectedCourseId: null, sessionRequested: false }
+    };
+
+    // -----------------------------------------------------------------------
+    // Utilities
+    // -----------------------------------------------------------------------
+    function esc(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function gsRun(fnName) {
+      var args = Array.prototype.slice.call(arguments, 1);
+      return new Promise(function (resolve, reject) {
+        var runner = google.script.run
+          .withSuccessHandler(resolve)
+          .withFailureHandler(function (err) { reject(err); });
+        runner[fnName].apply(runner, args);
+      });
+    }
+
+    function getActiveUser() {
+      if (!APP.data) return null;
+      var found = APP.data.users.filter(function (u) { return u.id === APP.data.activeUserId; })[0];
+      return found || APP.data.users[0];
+    }
+
+    function relTimeIso(iso) {
+      var ms = new Date(iso).getTime();
+      var diffMin = Math.round((Date.now() - ms) / 60000);
+      if (diffMin < 1) return 'Hace momentos';
+      if (diffMin < 60) return 'Hace ' + diffMin + 'm';
+      if (diffMin < 1440) return 'Hace ' + Math.floor(diffMin / 60) + 'h';
+      return new Date(iso).toLocaleDateString();
+    }
+
+    function byId(id) { return document.getElementById(id); }
+    function val(id) { var el = byId(id); return el ? el.value : ''; }
+    function checked(id) { var el = byId(id); return el ? el.checked : false; }
+
+    function refreshIcons() { if (window.lucide) lucide.createIcons(); }
+
+    // -----------------------------------------------------------------------
+    // Boot + polling
+    // -----------------------------------------------------------------------
+    document.addEventListener('DOMContentLoaded', function () {
+      renderAll();
+      loadData(true);
+      setInterval(function () { loadData(false); }, 9000);
+    });
+
+    function loadData(showSpinner) {
+      if (showSpinner) { APP.isSyncing = true; }
+      gsRun('getInitialData').then(function (data) {
+        APP.data = data;
+        if (showSpinner) {
+          setTimeout(function () { APP.isSyncing = false; renderAll(); }, 500);
+        } else if (!APP.editingCase && !APP.inspectingLogsCase && !APP.training.selectedCourseId) {
+          renderAll();
+        }
+      }).catch(function (err) {
+        console.error('Error cargando datos:', err);
+        APP.isSyncing = false;
+      });
+    }
+
+    function handleSyncNow() {
+      loadData(true);
+    }
+
+    // -----------------------------------------------------------------------
+    // Master render
+    // -----------------------------------------------------------------------
+    function renderAll() {
+      var root = byId('root');
+      if (!APP.data) {
+        root.innerHTML = loadingScreenHtml();
+        return;
+      }
+      root.innerHTML = layoutHtml();
+      renderMainContent();
+      renderModals();
+      refreshIcons();
+    }
+
+    function setActiveTab(tab) {
+      APP.activeTab = tab;
+      renderAll();
+    }
+
+    function loadingScreenHtml() {
+      return '' +
+        '<div class="min-h-screen bg-slate-950 flex flex-col items-center justify-center gap-4 text-slate-200">' +
+          '<i data-lucide="loader-2" class="w-10 h-10 animate-spin text-sky-400"></i>' +
+          '<p class="font-bold text-sm tracking-wide uppercase">Cargando base de datos PrintTech...</p>' +
+        '</div>';
+    }
+
+    // -----------------------------------------------------------------------
+    // Layout: sidebar, header, mobile nav, footer
+    // -----------------------------------------------------------------------
+    function layoutHtml() {
+      return '' +
+        '<div class="min-h-screen bg-slate-950 flex text-slate-200">' +
+          sidebarHtml() +
+          '<div class="flex-1 flex flex-col md:pl-64 min-w-0">' +
+            headerHtml() +
+            mobileSidebarHtml() +
+            '<main id="main-content" class="flex-grow p-4 md:p-8 animate-fade-in mb-16 md:mb-0"></main>' +
+            mobileBottomNavHtml() +
+            footerHtml() +
+          '</div>' +
+        '</div>' +
+        '<div id="modals-root"></div>' +
+        '<div id="toast-root"></div>';
+    }
+
+    function navButtonsHtml(extraClass) {
+      return NAV_ITEMS.map(function (item) {
+        var isActive = APP.activeTab === item.id;
+        return '' +
+          '<button onclick="setActiveTab(\'' + item.id + '\')" class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ' + extraClass + ' ' +
+            (isActive ? 'bg-sky-500/10 text-sky-400 shadow-sm font-semibold border border-sky-500/10' : 'text-slate-400 hover:bg-slate-800/50 hover:text-white') + '">' +
+            '<i data-lucide="' + item.icon + '" class="w-5 h-5 ' + (isActive ? 'text-sky-400' : '') + '"></i>' +
+            item.label +
+          '</button>';
+      }).join('');
+    }
+
+    function sidebarHtml() {
+      var d = APP.data;
+      var activeUser = getActiveUser();
+      var usersMenu = d.users.map(function (u) {
+        var sel = d.activeUserId === u.id;
+        return '' +
+          '<button onclick="handleSelectUser(\'' + u.id + '\')" class="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-left transition-colors ' +
+            (sel ? 'bg-slate-800 font-semibold text-white' : 'hover:bg-slate-800/50 text-slate-300') + '">' +
+            '<img src="' + esc(u.avatar) + '" class="w-6 h-6 rounded-full object-cover">' +
+            '<div><p class="font-semibold leading-none">' + esc(u.name) + '</p><p class="text-[9px] text-slate-400">' + esc(u.role) + '</p></div>' +
+          '</button>';
+      }).join('');
+
+      return '' +
+        '<aside class="hidden md:flex flex-col w-64 bg-slate-900/40 backdrop-blur border-r border-slate-800 fixed h-screen z-30">' +
+          '<div class="p-6 border-b border-slate-800/80">' +
+            '<div class="flex items-center gap-3">' +
+              '<div class="w-10 h-10 bg-sky-500/10 flex items-center justify-center rounded-xl border border-sky-500/20 text-sky-400 shrink-0 shadow-sm"><i data-lucide="database" class="w-5 h-5"></i></div>' +
+              '<div><div class="flex items-center gap-1.5"><h2 class="font-bold text-base leading-tight text-white tracking-tight">ISERA Portal</h2>' +
+              '<span class="text-[9px] font-mono font-bold bg-sky-500/15 text-sky-400 px-1.5 py-0.2 rounded border border-sky-500/20">PRO</span></div>' +
+              '<p class="text-[10px] text-slate-400 font-semibold tracking-wider uppercase mt-0.5">PrintTech Systems</p></div>' +
+            '</div>' +
+            '<div class="mt-3 flex items-center justify-between text-[10px] text-slate-500 font-mono">' +
+              '<span class="flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>v4.2.1-gas</span>' +
+            '</div>' +
+          '</div>' +
+          '<nav class="flex-1 px-3 py-4 space-y-1">' + navButtonsHtml('') + '</nav>' +
+          '<div class="p-4 mx-3 mb-4 bg-slate-900/50 border border-slate-800 rounded-2xl">' +
+            '<div class="flex items-center justify-between mb-2">' +
+              '<span class="text-[11px] font-bold text-slate-400 tracking-wide uppercase flex items-center gap-1.5"><i data-lucide="database-zap" class="w-3.5 h-3.5 text-sky-400"></i> Sheets Sync</span>' +
+              '<span class="flex h-2 w-2 relative"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span><span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span></span>' +
+            '</div>' +
+            '<p class="text-[11px] text-slate-400 truncate" title="' + esc(d.googleSheetsSettings.spreadsheetId) + '">ID: ...' + esc(String(d.googleSheetsSettings.spreadsheetId).slice(-8)) + '</p>' +
+            '<div class="mt-3 flex items-center justify-between">' +
+              '<span class="text-[10px] text-slate-500 font-medium">Auto-Sync Activo</span>' +
+              '<button onclick="handleSyncNow()" class="text-[10px] text-sky-400 flex items-center gap-1 hover:underline font-bold"><i data-lucide="refresh-cw" class="w-3 h-3 ' + (APP.isSyncing ? 'animate-spin' : '') + '"></i>Sincronizar</button>' +
+            '</div>' +
+          '</div>' +
+          '<div class="p-4 border-t border-slate-800 bg-slate-900/50">' +
+            '<div class="relative">' +
+              '<button onclick="byId(\'userDropdownPopup\').classList.toggle(\'hidden\')" class="w-full flex items-center gap-3 p-1.5 rounded-xl hover:bg-slate-800/50 transition-colors text-left">' +
+                '<img src="' + esc(activeUser.avatar) + '" class="w-10 h-10 rounded-full object-cover border-2 border-sky-400">' +
+                '<div class="flex-1 min-w-0"><p class="text-xs font-bold truncate text-slate-200">' + esc(activeUser.name) + '</p><p class="text-[10px] text-slate-400 font-semibold tracking-wider uppercase">' + esc(activeUser.role) + '</p></div>' +
+                '<i data-lucide="user-check" class="w-4 h-4 text-sky-400 shrink-0"></i>' +
+              '</button>' +
+              '<div id="userDropdownPopup" class="hidden absolute bottom-full left-0 w-full mb-2 bg-slate-900 border border-slate-800 shadow-xl z-50 py-2">' +
+                '<p class="px-3 py-1.5 text-[10px] font-bold text-slate-400 tracking-wider uppercase border-b border-slate-800">Simular Usuario (Roles)</p>' +
+                usersMenu +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+        '</aside>';
+    }
+
+    function headerHtml() {
+      var d = APP.data;
+      var activeUser = getActiveUser();
+      var logs = d.googleSheetsSettings.syncLogs.slice(0, 10).map(function (log) {
+        var levelClass = log.level === 'success' ? 'text-emerald-400' : log.level === 'error' ? 'text-rose-400' : 'text-sky-400';
+        return '' +
+          '<div class="text-xs pb-2 border-b border-slate-800 last:border-0">' +
+            '<div class="flex justify-between text-[9px] text-slate-400 mb-0.5"><span>' + new Date(log.timestamp).toLocaleTimeString() + '</span><span class="capitalize font-semibold ' + levelClass + '">' + esc(log.level) + '</span></div>' +
+            '<p class="text-slate-200 leading-tight">' + esc(log.message) + '</p>' +
+          '</div>';
+      }).join('') || '<p class="text-xs text-slate-500 py-2">Sin eventos recientes.</p>';
+
+      return '' +
+        '<header class="h-16 bg-slate-950/70 backdrop-blur border-b border-slate-800 sticky top-0 z-20 flex items-center justify-between px-4 md:px-8 shadow-sm">' +
+          '<div class="flex items-center gap-4 flex-1">' +
+            '<button onclick="byId(\'mobileSidebarOverlay\').classList.remove(\'hidden\')" class="md:hidden p-1.5 hover:bg-slate-800 rounded-xl text-slate-200"><i data-lucide="menu" class="w-6 h-6"></i></button>' +
+            '<div class="relative w-full max-w-md hidden sm:block">' +
+              '<span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"><i data-lucide="search" class="w-4 h-4"></i></span>' +
+              '<input type="text" placeholder="Buscar manuales, casos técnicos o herramientas..." class="w-full bg-slate-900/90 border border-slate-800 rounded-xl py-1.5 pl-9 pr-4 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-transparent transition-all">' +
+            '</div>' +
+            '<div class="md:hidden"><h1 class="font-bold text-white text-base">ISERA Portal</h1></div>' +
+          '</div>' +
+          '<div class="flex items-center gap-3">' +
+            '<div class="hidden lg:flex items-center gap-2 bg-slate-900 border border-slate-800 rounded-full px-3 py-1 text-xs text-sky-400 font-medium"><i data-lucide="database-zap" class="w-3.5 h-3.5"></i><span>G-Sheets Activo</span></div>' +
+            '<div class="relative">' +
+              '<button onclick="byId(\'notifPopup\').classList.toggle(\'hidden\')" class="p-2 text-slate-400 hover:bg-slate-800 rounded-full transition-colors relative">' +
+                '<i data-lucide="bell" class="w-5 h-5"></i><span class="absolute top-1.5 right-1.5 w-2 h-2 bg-rose-500 rounded-full ring-2 ring-slate-950"></span>' +
+              '</button>' +
+              '<div id="notifPopup" class="hidden absolute right-0 mt-2 w-80 bg-slate-900/95 backdrop-blur rounded-2xl border border-slate-800 shadow-xl z-50 py-3 px-4">' +
+                '<div class="flex items-center justify-between pb-2 border-b border-slate-800 mb-2"><h3 class="font-bold text-sm text-white">Logs de Sincronización</h3><span class="text-[9px] font-bold text-sky-400 px-2 py-0.5 bg-slate-800 rounded-full">Real-time</span></div>' +
+                '<div class="max-h-60 overflow-y-auto space-y-2 custom-scrollbar">' + logs + '</div>' +
+                '<button onclick="setActiveTab(\'settings\')" class="w-full mt-2 text-center text-xs text-sky-400 hover:underline font-bold">Ver consola de Sheets</button>' +
+              '</div>' +
+            '</div>' +
+            '<div class="h-6 w-px bg-slate-800"></div>' +
+            '<div class="flex items-center gap-2">' +
+              '<img src="' + esc(activeUser.avatar) + '" class="w-8 h-8 rounded-full object-cover border border-sky-400 md:border-0">' +
+              '<div class="hidden lg:block text-left leading-none"><p class="text-xs font-bold text-slate-200">' + esc(activeUser.name) + '</p><p class="text-[9px] text-slate-400 font-bold tracking-wider uppercase mt-0.5">' + esc(activeUser.level) + '</p></div>' +
+            '</div>' +
+          '</div>' +
+        '</header>';
+    }
+
+    function mobileSidebarHtml() {
+      var d = APP.data;
+      var usersList = d.users.map(function (u) {
+        var sel = d.activeUserId === u.id;
+        return '' +
+          '<button onclick="handleSelectUser(\'' + u.id + '\'); byId(\'mobileSidebarOverlay\').classList.add(\'hidden\')" class="flex items-center gap-2 p-2 rounded-xl text-xs text-left ' +
+            (sel ? 'bg-slate-800 border border-slate-700 font-semibold text-white' : 'hover:bg-slate-800/50 text-slate-400') + '">' +
+            '<img src="' + esc(u.avatar) + '" class="w-5 h-5 rounded-full object-cover"><div><p class="leading-none font-bold">' + esc(u.name) + '</p><p class="text-[9px]">' + esc(u.role) + '</p></div>' +
+          '</button>';
+      }).join('');
+      return '' +
+        '<div id="mobileSidebarOverlay" class="hidden fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 md:hidden flex">' +
+          '<div class="w-64 bg-slate-900 h-full p-4 flex flex-col justify-between border-r border-slate-800">' +
+            '<div>' +
+              '<div class="flex items-center justify-between pb-4 border-b border-slate-800 mb-4">' +
+                '<div class="flex items-center gap-2.5"><i data-lucide="database" class="w-5 h-5 text-sky-400"></i><span class="font-bold text-white text-base">Service Portal</span></div>' +
+                '<button onclick="byId(\'mobileSidebarOverlay\').classList.add(\'hidden\')" class="p-1 hover:bg-slate-800 rounded-lg text-slate-400"><i data-lucide="x" class="w-5 h-5"></i></button>' +
+              '</div>' +
+              '<nav class="space-y-1">' + navButtonsHtml('') + '</nav>' +
+            '</div>' +
+            '<div class="pt-4 border-t border-slate-800">' +
+              '<p class="text-[10px] font-bold text-slate-500 uppercase mb-2">Simular Rol</p>' +
+              '<div class="grid grid-cols-1 gap-1">' + usersList + '</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="flex-1" onclick="byId(\'mobileSidebarOverlay\').classList.add(\'hidden\')"></div>' +
+        '</div>';
+    }
+
+    function mobileBottomNavHtml() {
+      return '' +
+        '<nav class="md:hidden fixed bottom-0 left-0 right-0 bg-slate-900/90 backdrop-blur border-t border-slate-800 h-16 flex items-center justify-around px-4 z-40 shadow-lg">' +
+          NAV_ITEMS.map(function (item) {
+            var isActive = APP.activeTab === item.id;
+            return '' +
+              '<button onclick="setActiveTab(\'' + item.id + '\')" class="flex flex-col items-center gap-1 transition-all ' + (isActive ? 'text-sky-400 font-bold' : 'text-slate-400') + '">' +
+                '<i data-lucide="' + item.icon + '" class="w-5 h-5"></i><span class="text-[9px] uppercase tracking-wider font-semibold">' + item.id.substring(0, 5) + '</span>' +
+              '</button>';
+          }).join('') +
+        '</nav>';
+    }
+
+    function footerHtml() {
+      return '' +
+        '<footer class="hidden md:flex justify-between items-center py-5 px-8 border-t border-slate-800/80 text-xs text-slate-500 font-medium bg-slate-950/40">' +
+          '<div class="flex items-center gap-2"><span>© 2026 PrintTech Solutions Global</span></div>' +
+          '<div class="flex items-center gap-3 font-mono text-[11px]"><span class="flex items-center gap-1.5 text-emerald-400"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>Sistema Operativo</span><span>|</span><span class="text-slate-400">Build: 4.2.1-gas</span></div>' +
+        '</footer>';
+    }
+
+    function handleSelectUser(userId) {
+      gsRun('selectUser', userId).then(function () { loadData(false); });
+    }
+
+    // -----------------------------------------------------------------------
+    // Main content dispatcher
+    // -----------------------------------------------------------------------
+    function renderMainContent() {
+      var main = byId('main-content');
+      if (!main) return;
+      if (APP.activeTab === 'dashboard') main.innerHTML = dashboardHtml();
+      else if (APP.activeTab === 'cases') main.innerHTML = casesHtml();
+      else if (APP.activeTab === 'library') main.innerHTML = libraryHtml();
+      else if (APP.activeTab === 'training') main.innerHTML = trainingHtml();
+      else if (APP.activeTab === 'settings') main.innerHTML = settingsHtml();
+      refreshIcons();
+
+      if (APP.activeTab === 'cases') renderCasesResults();
+      if (APP.activeTab === 'library') renderLibraryResults();
+      if (APP.activeTab === 'dashboard') {
+        setTimeout(function () {
+          var bar = byId('trainingProgressBar');
+          if (bar) bar.style.width = '68%';
+        }, 300);
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Dashboard
+    // -----------------------------------------------------------------------
+    function dashboardHtml() {
+      var d = APP.data;
+      var totalCases = d.cases.length;
+      var activeCases = d.cases.filter(function (c) { return c.status === 'Abierto' || c.status === 'En Proceso'; }).length;
+      var pendingCases = d.cases.filter(function (c) { return c.status === 'Esperando Pieza'; }).length;
+      var solvedCases = d.cases.filter(function (c) { return c.status === 'Resuelto'; }).length;
+
+      var manualsHtml = d.manuals.map(function (m) {
+        var diffClass = m.difficulty === 'HARD' ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20' :
+          m.difficulty === 'MEDIUM' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+        var diffLabel = m.difficulty === 'HARD' ? 'NIVEL PRO' : m.difficulty === 'MEDIUM' ? 'AVANZADO' : 'BÁSICO';
+        return '' +
+          '<div onclick="handleDownloadManualFromDashboard(\'' + esc(m.id) + '\')" class="p-4 flex gap-4 hover:bg-slate-800/50 cursor-pointer group">' +
+            '<div class="w-24 h-16 rounded-xl bg-slate-800 overflow-hidden shrink-0 relative border border-slate-700"><img src="' + esc(m.image) + '" class="w-full h-full object-cover filter grayscale group-hover:grayscale-0 transition-all duration-300"></div>' +
+            '<div class="flex-grow flex flex-col justify-between">' +
+              '<p class="font-semibold text-sm text-white group-hover:text-sky-400 transition-colors line-clamp-1">' + esc(m.title) + '</p>' +
+              '<p class="text-xs text-slate-400 line-clamp-1">' + esc(m.description) + '</p>' +
+              '<div class="flex items-center gap-4 mt-1">' +
+                '<span class="flex items-center gap-1 text-[10px] text-slate-500 font-medium"><i data-lucide="timer" class="w-3 h-3"></i> 12 min</span>' +
+                '<span class="flex items-center gap-1 text-[10px] text-slate-500 font-medium"><i data-lucide="eye" class="w-3 h-3"></i> ' + m.views + ' vistas</span>' +
+                '<span class="text-[9px] px-1.5 py-0.5 rounded font-bold uppercase ' + diffClass + '">' + diffLabel + '</span>' +
+              '</div>' +
+            '</div>' +
+          '</div>';
+      }).join('');
+
+      return '' +
+        '<div class="space-y-8 max-w-7xl mx-auto">' +
+          '<section class="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 md:p-8 shadow-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-6 relative overflow-hidden">' +
+            '<div class="space-y-2 relative z-10">' +
+              '<h1 class="font-bold text-3xl md:text-4xl text-white tracking-tight">Bienvenido al Portal de Servicio</h1>' +
+              '<p class="text-slate-300 text-base md:text-lg max-w-2xl leading-relaxed">Gestione sus tareas técnicas, supervise el estado de los equipos y continúe su formación profesional con las herramientas avanzadas de PrintTech.</p>' +
+            '</div>' +
+            '<div class="shrink-0 flex items-center gap-2 bg-slate-800 border border-slate-700 rounded-full px-4 py-2 text-xs font-semibold text-sky-400 z-10"><i data-lucide="database-zap" class="w-4 h-4"></i><span>Google Sheets Conectado</span></div>' +
+          '</section>' +
+          '<div class="grid grid-cols-12 gap-6">' +
+            '<div class="col-span-12 lg:col-span-4 flex flex-col gap-4">' +
+              '<h3 class="text-xs font-bold text-slate-400 uppercase tracking-widest">Acciones Rápidas</h3>' +
+              '<button onclick="openNewCaseFromDashboard()" class="group bg-slate-900/40 border border-slate-800 rounded-2xl p-4 flex items-center gap-4 hover:border-sky-500 hover:shadow-md transition-all text-left w-full cursor-pointer">' +
+                '<div class="w-12 h-12 rounded-xl bg-slate-800 text-white flex items-center justify-center shrink-0 group-hover:bg-sky-500/20 group-hover:text-sky-400 transition-colors"><i data-lucide="plus-circle" class="w-6 h-6"></i></div>' +
+                '<div><p class="font-bold text-base text-white">Nuevo Caso</p><p class="text-xs text-slate-400">Reportar incidencia técnica inmediata</p></div>' +
+              '</button>' +
+              '<button onclick="setActiveTab(\'library\')" class="group bg-slate-900/40 border border-slate-800 rounded-2xl p-4 flex items-center gap-4 hover:border-sky-500 hover:shadow-md transition-all text-left w-full cursor-pointer">' +
+                '<div class="w-12 h-12 rounded-xl bg-slate-800 text-sky-400 flex items-center justify-center shrink-0 group-hover:bg-sky-500 group-hover:text-white transition-colors"><i data-lucide="history" class="w-6 h-6"></i></div>' +
+                '<div><p class="font-bold text-base text-white">Manuales Recientes</p><p class="text-xs text-slate-400">Acceder a guías consultadas hoy</p></div>' +
+              '</button>' +
+              '<button onclick="setActiveTab(\'training\')" class="group bg-slate-900/40 border border-slate-800 rounded-2xl p-4 flex items-center gap-4 hover:border-sky-500 hover:shadow-md transition-all text-left w-full relative overflow-hidden cursor-pointer">' +
+                '<div class="w-12 h-12 rounded-xl bg-slate-800 text-white flex items-center justify-center shrink-0 group-hover:bg-sky-500 group-hover:text-white transition-colors"><i data-lucide="award" class="w-6 h-6"></i></div>' +
+                '<div class="z-10"><p class="font-bold text-base text-white">Certificación en curso</p><p class="text-xs text-slate-400">Mantenimiento Preventivo L-Format</p></div>' +
+                '<div class="absolute bottom-0 left-0 h-1 bg-sky-500 w-2/3"></div>' +
+              '</button>' +
+            '</div>' +
+            '<div class="col-span-12 lg:col-span-8 bg-slate-900/40 border border-slate-800 p-6 rounded-3xl flex flex-col justify-between shadow-sm">' +
+              '<div class="flex justify-between items-start mb-6">' +
+                '<div><h3 class="font-bold text-lg text-white mb-1">Estado de Casos</h3><p class="text-xs text-slate-400">Resumen de operaciones en tiempo real</p></div>' +
+                '<button onclick="setActiveTab(\'cases\')" class="text-xs text-sky-400 font-bold hover:underline">VER TODOS LOS CASOS</button>' +
+              '</div>' +
+              '<div class="grid grid-cols-1 md:grid-cols-3 gap-4">' +
+                '<div class="bg-slate-950/40 border border-slate-800/80 p-5 rounded-2xl border-l-4 border-sky-500"><p class="text-slate-400 text-xs font-bold tracking-wide uppercase mb-1">ACTIVOS</p><div class="flex items-baseline gap-2"><span class="text-4xl font-bold font-mono text-white">' + activeCases + '</span></div></div>' +
+                '<div class="bg-slate-950/40 border border-slate-800/80 p-5 rounded-2xl border-l-4 border-rose-500"><p class="text-slate-400 text-xs font-bold tracking-wide uppercase mb-1">PENDIENTES</p><div class="flex items-baseline gap-2"><span class="text-4xl font-bold font-mono text-white">' + pendingCases + '</span><span class="text-rose-400 text-xs font-semibold">Urgente</span></div></div>' +
+                '<div class="bg-slate-950/40 border border-slate-800/80 p-5 rounded-2xl border-l-4 border-emerald-500"><p class="text-slate-400 text-xs font-bold tracking-wide uppercase mb-1">RESUELTOS</p><div class="flex items-baseline gap-2"><span class="text-4xl font-bold font-mono text-white">' + solvedCases + '</span></div></div>' +
+              '</div>' +
+            '</div>' +
+            '<div class="col-span-12 lg:col-span-7 bg-slate-900/40 border border-slate-800 rounded-3xl flex flex-col overflow-hidden shadow-sm">' +
+              '<div class="p-6 border-b border-slate-800 flex justify-between items-center"><h3 class="font-bold text-lg text-white">Instructivos Populares</h3><i data-lucide="book-open" class="w-5 h-5 text-slate-400"></i></div>' +
+              '<div class="divide-y divide-slate-800 overflow-y-auto max-h-[360px] custom-scrollbar">' + manualsHtml + '</div>' +
+            '</div>' +
+            '<div class="col-span-12 lg:col-span-5 flex flex-col gap-6">' +
+              '<div class="bg-slate-800/80 border border-slate-700/80 rounded-3xl p-6 text-white relative overflow-hidden shadow-md">' +
+                '<div class="relative z-10 flex flex-col justify-between h-full">' +
+                  '<div class="flex justify-between items-start mb-6"><div><h3 class="font-bold text-lg text-white mb-1">Próximos Entrenamientos</h3><p class="text-slate-400 text-xs">Tu ruta de aprendizaje actual</p></div><span class="bg-sky-500 text-white text-[10px] font-bold px-2.5 py-1 rounded-full uppercase tracking-wider">EN VIVO</span></div>' +
+                  '<div class="mb-6"><div class="flex justify-between items-end mb-2"><p class="font-bold text-sm">Maintenance Specialist</p><p class="text-xs font-mono font-bold text-sky-400">68%</p></div>' +
+                  '<div class="w-full h-2.5 bg-slate-700 rounded-full overflow-hidden"><div id="trainingProgressBar" class="h-full bg-gradient-to-r from-sky-500 to-emerald-400 rounded-full transition-all duration-1000 ease-out" style="width:0%"></div></div></div>' +
+                  '<div class="flex gap-4 items-center text-xs text-slate-300 font-medium"><span class="flex items-center gap-1"><i data-lucide="timer" class="w-4 h-4"></i> 14 Nov</span><span class="flex items-center gap-1"><i data-lucide="file-text" class="w-4 h-4"></i> 4 Módulos restantes</span></div>' +
+                '</div>' +
+              '</div>' +
+              '<div class="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 shadow-sm flex-grow flex flex-col justify-between">' +
+                '<h4 class="text-xs font-bold text-slate-400 uppercase tracking-widest mb-4">RECURSOS TÉCNICOS</h4>' +
+                '<div class="space-y-4">' +
+                  '<a href="#" onclick="event.preventDefault(); setActiveTab(\'settings\')" class="flex items-center justify-between group cursor-pointer pb-2 border-b border-slate-800 hover:border-sky-500/40 transition-colors"><div class="flex items-center gap-3"><i data-lucide="terminal" class="w-5 h-5 text-sky-400"></i><span class="text-sm font-bold text-white group-hover:text-sky-400 group-hover:underline">Consola de Sincronización G-Sheets</span></div><i data-lucide="arrow-right" class="w-4 h-4 text-slate-500"></i></a>' +
+                  '<a href="#" onclick="event.preventDefault(); setActiveTab(\'training\')" class="flex items-center justify-between group cursor-pointer pb-2 border-b border-slate-800 hover:border-sky-500/40 transition-colors"><div class="flex items-center gap-3"><i data-lucide="wrench" class="w-5 h-5 text-sky-400"></i><span class="text-sm font-bold text-white group-hover:text-sky-400 group-hover:underline">Kit de Certificaciones Virtuales</span></div><i data-lucide="arrow-right" class="w-4 h-4 text-slate-500"></i></a>' +
+                  '<a href="#" onclick="event.preventDefault(); setActiveTab(\'library\')" class="flex items-center justify-between group cursor-pointer hover:border-sky-500/40 transition-colors"><div class="flex items-center gap-3"><i data-lucide="users" class="w-5 h-5 text-sky-400"></i><span class="text-sm font-bold text-white group-hover:text-sky-400 group-hover:underline">Comunidad de Expertos Técnicos</span></div><i data-lucide="arrow-right" class="w-4 h-4 text-slate-500"></i></a>' +
+                '</div>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+    }
+
+    function openNewCaseFromDashboard() {
+      APP.activeTab = 'cases';
+      renderAll();
+      openCreateCaseModal();
+    }
+
+    function handleDownloadManualFromDashboard(manualId) {
+      gsRun('downloadManual', manualId).then(function () {
+        APP.activeTab = 'library';
+        loadData(false);
+        renderAll();
+      });
+    }
+
+    // -----------------------------------------------------------------------
+    // Case Management
+    // -----------------------------------------------------------------------
+    function casesHtml() {
+      return '' +
+        '<div class="space-y-6 max-w-7xl mx-auto">' +
+          '<div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-slate-900/40 p-6 border border-slate-800 rounded-3xl shadow-sm">' +
+            '<div><h2 class="font-bold text-2xl text-white">Centro de Casos Técnicos</h2><p class="text-slate-400 text-sm mt-1">Gestión, validación y sincronización en tiempo real con Google Sheets.</p></div>' +
+            '<div class="flex items-center gap-3">' +
+              '<button onclick="handleSyncNow()" class="px-4 py-2 border border-slate-800 rounded-xl hover:bg-slate-800/60 transition-colors text-xs font-bold text-sky-400 flex items-center gap-2 cursor-pointer"><i data-lucide="loader-2" class="w-4 h-4 ' + (APP.isSyncing ? 'animate-spin' : '') + '"></i>Sincronizar Sheets</button>' +
+              '<button onclick="openCreateCaseModal()" class="bg-sky-500 hover:bg-sky-600 text-white px-5 py-2.5 rounded-xl flex items-center gap-2 shadow-md transition-all active:scale-95 text-sm font-bold cursor-pointer"><i data-lucide="plus" class="w-5 h-5"></i><span>Nuevo Caso</span></button>' +
+            '</div>' +
+          '</div>' +
+          '<div class="grid grid-cols-12 gap-6">' +
+            '<div class="col-span-12 lg:col-span-9 space-y-4">' +
+              '<div class="bg-slate-900/40 p-4 rounded-2xl border border-slate-800 flex flex-wrap gap-4 items-center shadow-sm">' +
+                '<div class="relative flex-1 min-w-[200px]">' +
+                  '<span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500"><i data-lucide="search" class="w-4 h-4"></i></span>' +
+                  '<input id="caseSearchInput" type="text" oninput="renderCasesResults()" placeholder="Buscar por ID, cliente, modelo o descripción..." class="w-full bg-slate-800 border border-slate-700 rounded-full py-1.5 pl-10 pr-4 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-transparent transition-all">' +
+                '</div>' +
+                '<div class="flex flex-wrap gap-2 items-center">' +
+                  '<span class="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1 shrink-0"><i data-lucide="sliders-horizontal" class="w-3.5 h-3.5 text-sky-400"></i> Filtrar por:</span>' +
+                  '<select id="caseStatusFilter" onchange="renderCasesResults()" class="bg-slate-800 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-slate-200 focus:ring-1 focus:ring-sky-500 outline-none">' +
+                    '<option>Todos los Estados</option><option>Abierto</option><option>En Proceso</option><option>Esperando Pieza</option><option>Resuelto</option>' +
+                  '</select>' +
+                  '<select id="casePriorityFilter" onchange="renderCasesResults()" class="bg-slate-800 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-slate-200 focus:ring-1 focus:ring-sky-500 outline-none">' +
+                    '<option>Todas las Prioridades</option><option>Crítica</option><option>Alta</option><option>Media</option>' +
+                  '</select>' +
+                '</div>' +
+              '</div>' +
+              '<div id="casesTableWrap" class="bg-slate-900/40 border border-slate-800 rounded-3xl overflow-hidden shadow-sm"></div>' +
+            '</div>' +
+            '<div class="col-span-12 lg:col-span-3 space-y-6" id="casesSidebar"></div>' +
+          '</div>' +
+        '</div>';
+    }
+
+    function caseStatusBadge(status) {
+      var cls = status === 'Abierto' ? 'bg-rose-500/10 text-rose-400' :
+        status === 'En Proceso' ? 'bg-sky-500/10 text-sky-400' :
+        status === 'Esperando Pieza' ? 'bg-amber-500/10 text-amber-400' : 'bg-emerald-500/10 text-emerald-400';
+      var pulse = status === 'Abierto' ? '<span class="w-1.5 h-1.5 bg-rose-400 rounded-full animate-ping"></span>' : '';
+      return '<span class="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase inline-flex items-center gap-1.5 ' + cls + '">' + pulse + esc(status) + '</span>';
+    }
+
+    function renderCasesResults() {
+      if (!APP.data) return;
+      var q = (val('caseSearchInput') || '').toLowerCase();
+      var statusFilter = val('caseStatusFilter') || 'Todos los Estados';
+      var priorityFilter = val('casePriorityFilter') || 'Todas las Prioridades';
+
+      var filtered = APP.data.cases.filter(function (c) {
+        var matchesSearch = c.id.toLowerCase().indexOf(q) !== -1 || c.client.toLowerCase().indexOf(q) !== -1 ||
+          c.model.toLowerCase().indexOf(q) !== -1 || (c.description && c.description.toLowerCase().indexOf(q) !== -1);
+        var matchesStatus = statusFilter === 'Todos los Estados' || c.status === statusFilter;
+        var matchesPriority = priorityFilter === 'Todas las Prioridades' || c.priority === priorityFilter;
+        return matchesSearch && matchesStatus && matchesPriority;
+      });
+
+      var rows = filtered.length === 0
+        ? '<tr><td colspan="6" class="px-5 py-10 text-center text-slate-500 font-medium bg-slate-900/10">No se encontraron casos activos que coincidan con los filtros seleccionados.</td></tr>'
+        : filtered.map(function (c) {
+          var activeUser = getActiveUser();
+          var canDelete = activeUser.role === 'Admin Tech';
+          var priorityClass = c.priority === 'Crítica' ? 'text-rose-400' : c.priority === 'Alta' ? 'text-amber-400' : 'text-sky-400';
+          return '' +
+            '<tr class="hover:bg-slate-800/30 transition-colors group">' +
+              '<td class="px-5 py-4 font-mono font-bold text-sky-400 text-sm whitespace-nowrap">' + esc(c.id) + '</td>' +
+              '<td class="px-5 py-4 font-semibold text-white text-sm"><div><p class="line-clamp-1">' + esc(c.client) + '</p><p class="text-[10px] text-slate-400 font-medium mt-0.5">Por: ' + esc(c.reporter) + '</p></div></td>' +
+              '<td class="px-5 py-4 font-medium text-slate-300 text-xs whitespace-nowrap">' + esc(c.model) + '</td>' +
+              '<td class="px-5 py-4 whitespace-nowrap">' + caseStatusBadge(c.status) + '</td>' +
+              '<td class="px-5 py-4 whitespace-nowrap"><span class="font-bold text-[11px] ' + priorityClass + '">' + esc(c.priority) + '</span></td>' +
+              '<td class="px-5 py-4 text-right whitespace-nowrap"><div class="flex justify-end gap-1.5">' +
+                '<button onclick="openAuditLog(\'' + esc(c.id) + '\')" class="p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white rounded-lg transition-colors cursor-pointer" title="Ver historial de auditoría"><i data-lucide="history" class="w-4 h-4"></i></button>' +
+                '<button onclick="openEditCase(\'' + esc(c.id) + '\')" class="p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white rounded-lg transition-colors cursor-pointer" title="Editar caso"><i data-lucide="edit-3" class="w-4 h-4"></i></button>' +
+                (canDelete ? '<button onclick="confirmDeleteCase(\'' + esc(c.id) + '\')" class="p-1.5 text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors cursor-pointer" title="Eliminar caso de forma permanente"><i data-lucide="trash-2" class="w-4 h-4"></i></button>' : '') +
+              '</div></td>' +
+            '</tr>';
+        }).join('');
+
+      byId('casesTableWrap').innerHTML = '' +
+        '<div class="overflow-x-auto custom-scrollbar"><table class="w-full text-left border-collapse">' +
+          '<thead><tr class="bg-slate-950 border-b border-slate-800">' +
+            '<th class="px-5 py-3 text-[11px] font-bold text-slate-400 tracking-wider uppercase">ID Caso</th>' +
+            '<th class="px-5 py-3 text-[11px] font-bold text-slate-400 tracking-wider uppercase">Cliente</th>' +
+            '<th class="px-5 py-3 text-[11px] font-bold text-slate-400 tracking-wider uppercase">Modelo Impresora</th>' +
+            '<th class="px-5 py-3 text-[11px] font-bold text-slate-400 tracking-wider uppercase">Estado</th>' +
+            '<th class="px-5 py-3 text-[11px] font-bold text-slate-400 tracking-wider uppercase">Prioridad</th>' +
+            '<th class="px-5 py-3 text-[11px] font-bold text-slate-400 tracking-wider uppercase text-right">Acciones</th>' +
+          '</tr></thead><tbody class="divide-y divide-slate-800 text-xs">' + rows + '</tbody></table></div>' +
+        '<div class="p-4 bg-slate-950/60 border-t border-slate-800 flex flex-col sm:flex-row justify-between items-center gap-2 text-xs text-slate-400 font-medium">' +
+          '<span>Mostrando ' + filtered.length + ' de ' + APP.data.cases.length + ' casos totales en la base de datos.</span>' +
+          '<span class="flex items-center gap-1 bg-slate-900 border border-slate-800 px-2.5 py-1 rounded-full text-[10px] font-bold text-sky-400 uppercase"><i data-lucide="file-spreadsheet" class="w-3.5 h-3.5"></i> Sincronización en tiempo real habilitada</span>' +
+        '</div>';
+
+      var criticalCases = APP.data.cases.filter(function (c) { return c.priority === 'Crítica'; });
+      var criticalHtml = criticalCases.length === 0
+        ? '<p class="text-xs text-slate-500 font-medium text-center py-6">Excelente: No hay casos críticos bloqueantes hoy.</p>'
+        : criticalCases.map(function (c) {
+          return '' +
+            '<div onclick="openEditCase(\'' + esc(c.id) + '\')" class="bg-slate-950/60 rounded-xl p-3 border border-slate-800 border-l-4 border-l-rose-500 shadow-sm cursor-pointer hover:shadow-md hover:scale-[1.01] transition-all">' +
+              '<div class="flex justify-between items-center mb-1"><span class="font-mono font-bold text-sky-400 text-xs">' + esc(c.id) + '</span><span class="text-[9px] font-bold text-rose-400 uppercase tracking-widest bg-rose-500/10 px-1.5 py-0.5 rounded">BLOQUEANTE</span></div>' +
+              '<h4 class="font-bold text-xs text-white line-clamp-1">' + esc(c.client) + '</h4><p class="text-[10px] text-slate-400 truncate mt-0.5">' + esc(c.model) + '</p>' +
+              '<div class="flex items-center justify-between mt-3 pt-2 border-t border-slate-800"><span class="text-[10px] text-slate-500 italic truncate max-w-[100px]">Reportado por ' + esc(c.reporter) + '</span><span class="text-[9px] text-sky-400 font-bold">Ver ›</span></div>' +
+            '</div>';
+        }).join('');
+
+      var createdToday = APP.data.cases.length + 3;
+      var solvedToday = APP.data.cases.filter(function (c) { return c.status === 'Resuelto'; }).length + 6;
+      var efficiency = Math.round((solvedToday / (createdToday || 1)) * 100);
+
+      byId('casesSidebar').innerHTML = '' +
+        '<div class="bg-slate-900/40 rounded-3xl p-6 border border-slate-800 shadow-sm relative overflow-hidden">' +
+          '<h3 class="font-bold text-base text-white mb-4 flex items-center gap-2"><i data-lucide="alert-triangle" class="w-5 h-5 text-rose-400 shrink-0"></i>Casos Críticos (' + criticalCases.length + ')</h3>' +
+          '<div class="space-y-3 max-h-[300px] overflow-y-auto custom-scrollbar pr-1">' + criticalHtml + '</div>' +
+        '</div>' +
+        '<div class="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 shadow-sm space-y-4">' +
+          '<h3 class="text-xs font-bold text-slate-400 uppercase tracking-widest">Estadísticas de Hoy</h3>' +
+          '<div class="grid grid-cols-2 gap-4"><div class="space-y-1"><p class="text-[10px] text-slate-400 font-bold uppercase">Casos Nuevos</p><p class="text-3xl font-bold text-white font-mono">' + createdToday + '</p></div>' +
+          '<div class="space-y-1"><p class="text-[10px] text-slate-400 font-bold uppercase">Resueltos</p><p class="text-3xl font-bold text-sky-400 font-mono">' + solvedToday + '</p></div></div>' +
+          '<div class="pt-4 border-t border-slate-800 space-y-2"><div class="flex justify-between text-xs font-bold text-slate-200"><span>Eficiencia Operativa</span><span class="font-mono">' + efficiency + '%</span></div>' +
+          '<div class="w-full bg-slate-800 h-2 rounded-full overflow-hidden"><div class="bg-sky-500 h-full rounded-full transition-all duration-700" style="width:' + Math.min(100, efficiency) + '%"></div></div></div>' +
+        '</div>';
+
+      refreshIcons();
+    }
+
+    function openCreateCaseModal() {
+      var suggestedId = '#77' + Math.floor(100 + Math.random() * 899) + '-A';
+      APP.editingCase = { isNew: true, id: suggestedId, client: '', model: PRINTER_MODELS[0], status: 'Abierto', priority: 'Media', description: '' };
+      APP.formError = '';
+      renderModals();
+    }
+
+    function openEditCase(id) {
+      var c = APP.data.cases.filter(function (x) { return x.id === id; })[0];
+      if (!c) return;
+      var activeUser = getActiveUser();
+      if (activeUser.role === 'Técnico Nvl 1' && c.reporter !== activeUser.name) {
+        alert('Acceso Restringido: Como Técnico Nvl 1, solo puedes editar casos reportados por ti mismo. Este caso fue reportado por: ' + c.reporter);
+        return;
+      }
+      APP.editingCase = { isNew: false, id: c.id, client: c.client, model: c.model, status: c.status, priority: c.priority, description: c.description, reporter: c.reporter };
+      APP.formError = '';
+      renderModals();
+    }
+
+    function closeCaseModal() {
+      APP.editingCase = null;
+      APP.formError = '';
+      renderModals();
+    }
+
+    function openAuditLog(id) {
+      var c = APP.data.cases.filter(function (x) { return x.id === id; })[0];
+      if (!c) return;
+      APP.inspectingLogsCase = c;
+      renderModals();
+    }
+
+    function closeAuditModal() {
+      APP.inspectingLogsCase = null;
+      renderModals();
+    }
+
+    function confirmDeleteCase(id) {
+      var activeUser = getActiveUser();
+      if (activeUser.role !== 'Admin Tech') {
+        alert('Acceso Restringido: Solo administradores (Admin Tech) pueden eliminar de forma permanente registros de la hoja de cálculo de Google Sheets.');
+        return;
+      }
+      if (confirm('¿Está seguro de que desea eliminar permanentemente el caso ' + id + '? Esta acción quitará la fila de la hoja de cálculo de Google Sheets de forma instantánea.')) {
+        gsRun('deleteCase', id).then(function (res) {
+          if (!res.success) alert(res.error || 'No se pudo eliminar el caso.');
+          loadData(false);
+        });
+      }
+    }
+
+    function submitCaseForm(ev) {
+      ev.preventDefault();
+      var id = val('caseFormId').trim();
+      var client = val('caseFormClient');
+      var model = val('caseFormModel');
+      var priority = val('caseFormPriority');
+      var status = val('caseFormStatus');
+      var description = val('caseFormDescription');
+      var rules = APP.data.validationRules;
+
+      var errors = {};
+      var idRegex;
+      try { idRegex = new RegExp(rules.caseIdRegex); } catch (e) { idRegex = /^#[0-9]{5}-[A-Z]$/; }
+      if (!id) errors.id = 'El código del caso es obligatorio.';
+      else if (!idRegex.test(id)) errors.id = 'Formato incorrecto. Debe cumplir con ' + rules.caseIdRegex + ' (Ej: #77412-A).';
+      if (!client.trim()) errors.client = 'El nombre del cliente es obligatorio.';
+      else if (client.trim().length < rules.minClientLength) errors.client = 'Mínimo de caracteres: ' + rules.minClientLength + '.';
+      if (!rules.allowSpecialCharsInClient) {
+        var specialChars = /[^a-zA-Z0-9\sÁÉÍÓÚáéíóúÑñ.,-]/;
+        if (specialChars.test(client)) errors.client = 'No se permiten caracteres especiales o símbolos.';
+      }
+      if (rules.requireModelSelection && !model) errors.model = 'Selecciona un modelo técnico de impresora.';
+      if (rules.requireDescription && (!description || description.trim().length < 10)) errors.description = 'Descripción obligatoria (mínimo 10 caracteres).';
+
+      if (Object.keys(errors).length > 0) {
+        APP.formError = Object.values(errors)[0];
+        renderModals();
+        return;
+      }
+
+      APP.isSubmitting = true;
+      renderModals();
+      var activeUser = getActiveUser();
+      var payload = {
+        id: id, client: client, model: model, status: status, priority: priority, description: description,
+        reporter: (APP.editingCase && !APP.editingCase.isNew) ? APP.editingCase.reporter : activeUser.name
+      };
+      gsRun('saveCase', payload).then(function (res) {
+        APP.isSubmitting = false;
+        if (res.success) {
+          APP.editingCase = null;
+          APP.formError = '';
+          renderModals();
+          loadData(false);
+        } else {
+          APP.formError = res.error || 'Ocurrió un error al guardar el caso.';
+          renderModals();
+        }
+      }).catch(function () {
+        APP.isSubmitting = false;
+        APP.formError = 'Error de comunicación con el servidor.';
+        renderModals();
+      });
+    }
+
+    function caseModalHtml() {
+      var ec = APP.editingCase;
+      var activeUser = getActiveUser();
+      var modelsOptions = PRINTER_MODELS.map(function (m) {
+        return '<option value="' + esc(m) + '" ' + (m === ec.model ? 'selected' : '') + '>' + esc(m) + '</option>';
+      }).join('');
+      var statusOptions = ['Abierto', 'En Proceso', 'Esperando Pieza', 'Resuelto'].map(function (s) {
+        return '<option value="' + s + '" ' + (s === ec.status ? 'selected' : '') + '>' + s + '</option>';
+      }).join('');
+      var priorityOptions = ['Media', 'Alta', 'Crítica'].map(function (p) {
+        return '<option value="' + p + '" ' + (p === ec.priority ? 'selected' : '') + '>' + p + '</option>';
+      }).join('');
+
+      return '' +
+        '<div class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">' +
+          '<div class="bg-slate-900 w-full max-w-lg rounded-3xl border border-slate-800 shadow-2xl overflow-hidden animate-fade-in">' +
+            '<div class="bg-slate-950 border-b border-slate-800 p-5 text-white flex justify-between items-center">' +
+              '<div><h3 class="font-bold text-lg text-white">' + (!ec.isNew ? 'Editar Caso ' + esc(ec.id) : 'Registrar Nuevo Caso Técnico') + '</h3><p class="text-xs text-slate-400 mt-0.5">Captura con validación de datos en tiempo real.</p></div>' +
+              '<button onclick="closeCaseModal()" class="p-1.5 hover:bg-white/10 rounded-xl transition-colors text-white"><i data-lucide="x" class="w-5 h-5"></i></button>' +
+            '</div>' +
+            '<form onsubmit="submitCaseForm(event)" class="p-6 space-y-4">' +
+              (APP.formError ? '<div class="bg-rose-500/10 border border-rose-500/20 text-rose-400 px-4 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-2"><i data-lucide="alert-triangle" class="w-4 h-4 shrink-0"></i><span>' + esc(APP.formError) + '</span></div>' : '') +
+              '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Código de Caso (Sincronización ID)</label>' +
+                '<input id="caseFormId" type="text" value="' + esc(ec.id) + '" ' + (!ec.isNew ? 'disabled' : '') + ' placeholder="#77412-A" class="w-full bg-slate-800 border border-slate-700 rounded-xl py-2 px-3 text-sm text-white focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-50">' +
+                '<p class="text-[10px] text-slate-500 font-medium leading-none mt-1">Formato obligatorio: ' + esc(APP.data.validationRules.caseIdRegex) + '</p></div>' +
+              '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Nombre del Cliente / Empresa</label>' +
+                '<input id="caseFormClient" type="text" value="' + esc(ec.client) + '" placeholder="Ej: Gráficas del Norte S.A." class="w-full bg-slate-800 border border-slate-700 rounded-xl py-2 px-3 text-sm text-white focus:outline-none focus:ring-1 focus:ring-sky-500"></div>' +
+              '<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">' +
+                '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Modelo de Plóter/Impresora</label><select id="caseFormModel" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-sky-500">' + modelsOptions + '</select></div>' +
+                '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Prioridad Técnica</label><select id="caseFormPriority" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-sky-500">' + priorityOptions + '</select></div>' +
+              '</div>' +
+              '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Estado de Diagnóstico / Reparación</label><select id="caseFormStatus" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-sky-500">' + statusOptions + '</select></div>' +
+              '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Descripción Detallada del Fallo Técnico</label>' +
+                '<textarea id="caseFormDescription" rows="3" placeholder="Detalle los códigos de error visualizados, fallos de calibración o piezas requeridas..." class="w-full bg-slate-800 border border-slate-700 rounded-xl py-2 px-3 text-sm text-white focus:outline-none focus:ring-1 focus:ring-sky-500">' + esc(ec.description) + '</textarea></div>' +
+              '<div class="pt-4 border-t border-slate-800 flex justify-between items-center">' +
+                '<span class="text-[10px] text-slate-400 font-semibold uppercase flex items-center gap-1"><i data-lucide="info" class="w-3.5 h-3.5 text-sky-400"></i> Operador: ' + esc(activeUser.name) + '</span>' +
+                '<div class="flex gap-2">' +
+                  '<button type="button" onclick="closeCaseModal()" class="px-4 py-2 border border-slate-700 rounded-xl text-xs font-bold text-slate-300 hover:bg-slate-800 cursor-pointer">Cancelar</button>' +
+                  '<button type="submit" ' + (APP.isSubmitting ? 'disabled' : '') + ' class="bg-sky-500 hover:bg-sky-600 text-white px-5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer disabled:opacity-55">' +
+                    (APP.isSubmitting ? '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>' : '') +
+                    '<span>' + (!ec.isNew ? 'Actualizar y Sincronizar' : 'Sincronizar con G-Sheets') + '</span>' +
+                  '</button>' +
+                '</div>' +
+              '</div>' +
+            '</form>' +
+          '</div>' +
+        '</div>';
+    }
+
+    function auditModalHtml() {
+      var c = APP.inspectingLogsCase;
+      var logsHtml = (c.historicalLogs || []).map(function (log) {
+        return '' +
+          '<div class="relative space-y-1 pb-1">' +
+            '<span class="absolute -left-[21px] top-1 w-2.5 h-2.5 rounded-full bg-sky-500 border-2 border-slate-900 ring-2 ring-sky-500/20"></span>' +
+            '<div class="flex justify-between items-center"><span class="text-xs font-bold text-white">' + esc(log.action) + ' por ' + esc(log.user) + '</span><span class="text-[10px] text-slate-500">' + new Date(log.timestamp).toLocaleString() + '</span></div>' +
+            '<p class="text-xs text-slate-400 leading-tight">' + esc(log.detail) + '</p>' +
+          '</div>';
+      }).join('');
+      return '' +
+        '<div class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">' +
+          '<div class="bg-slate-900 w-full max-w-lg rounded-3xl border border-slate-800 shadow-2xl overflow-hidden animate-fade-in">' +
+            '<div class="bg-slate-950 border-b border-slate-800 p-5 text-white flex justify-between items-center">' +
+              '<div><h3 class="font-bold text-lg text-white">Historial de Auditoría: ' + esc(c.id) + '</h3><p class="text-xs text-slate-400 mt-0.5">Sincronización y cambios en tiempo real registrados en Google Sheets.</p></div>' +
+              '<button onclick="closeAuditModal()" class="p-1.5 hover:bg-white/10 rounded-xl text-white cursor-pointer"><i data-lucide="x" class="w-5 h-5"></i></button>' +
+            '</div>' +
+            '<div class="p-6 space-y-4 max-h-[400px] overflow-y-auto custom-scrollbar">' +
+              '<div class="bg-slate-800 p-4 rounded-2xl space-y-1"><p class="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Cliente de Incidencia</p><p class="font-bold text-sm text-sky-400">' + esc(c.client) + '</p>' +
+              '<p class="text-xs text-slate-300 mt-2"><span class="font-semibold">Modelo:</span> ' + esc(c.model) + '</p><p class="text-xs text-slate-300 mt-1"><span class="font-semibold">Descripción:</span> ' + esc(c.description) + '</p></div>' +
+              '<h4 class="text-[11px] font-bold text-slate-400 uppercase tracking-widest pt-2">Línea de Tiempo de Auditoría</h4>' +
+              '<div class="space-y-4 pl-4 border-l border-sky-500/20 relative">' + logsHtml + '</div>' +
+            '</div>' +
+            '<div class="p-4 bg-slate-950 border-t border-slate-800 flex justify-end"><button onclick="closeAuditModal()" class="px-5 py-2 bg-sky-500 hover:bg-sky-600 text-white text-xs font-bold rounded-xl cursor-pointer">Cerrar Auditoría</button></div>' +
+          '</div>' +
+        '</div>';
+    }
+
+    // -----------------------------------------------------------------------
+    // Instruction Library
+    // -----------------------------------------------------------------------
+    function libraryHtml() {
+      var catButtons = LIBRARY_CATEGORIES.map(function (cat) {
+        var sel = APP.library.selectedType === cat;
+        return '<button onclick="setLibraryCategory(\'' + cat + '\')" class="px-3.5 py-1.5 rounded-full text-xs font-semibold tracking-wide transition-all cursor-pointer ' +
+          (sel ? 'bg-sky-500 text-white font-bold border border-sky-500' : 'border border-slate-800 text-slate-300 hover:bg-slate-800/50 hover:text-white') + '">' + esc(cat) + '</button>';
+      }).join('');
+
+      return '' +
+        '<div class="space-y-6 max-w-7xl mx-auto">' +
+          '<div class="flex flex-col gap-1 bg-slate-900/40 p-6 border border-slate-800 rounded-3xl shadow-sm"><h1 class="font-bold text-2xl text-white">Biblioteca de Instructivos</h1><p class="text-slate-400 text-sm">Accede a la base de datos técnica más completa para profesionales de impresión.</p></div>' +
+          '<div class="flex flex-col lg:flex-row gap-6">' +
+            '<div class="flex-grow space-y-6">' +
+              '<div class="bg-slate-900/40 p-4 rounded-2xl border border-slate-800 flex flex-col sm:flex-row gap-4 items-center justify-between shadow-sm">' +
+                '<div class="flex flex-wrap gap-1.5 w-full sm:w-auto">' + catButtons + '</div>' +
+                '<div class="relative w-full sm:w-64"><span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"><i data-lucide="search" class="w-4 h-4"></i></span>' +
+                  '<input id="libSearchInput" type="text" value="' + esc(APP.library.search) + '" oninput="onLibrarySearchInput(this.value)" placeholder="Buscar instructivo..." class="w-full bg-slate-800 border border-slate-700 text-slate-200 placeholder-slate-500 rounded-full py-1.5 pl-10 pr-4 text-xs focus:outline-none focus:ring-1 focus:ring-sky-500"></div>' +
+              '</div>' +
+              '<div id="libraryGrid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-2 gap-6"></div>' +
+            '</div>' +
+            '<aside class="w-full lg:w-80 flex flex-col gap-6 shrink-0">' +
+              '<div class="bg-slate-900/40 border border-slate-800 rounded-3xl p-5 flex flex-col gap-4 shadow-sm">' +
+                '<h2 class="font-bold text-base text-white flex items-center gap-2 border-b border-slate-800 pb-2"><i data-lucide="sparkles" class="w-5 h-5 text-sky-400"></i>Recientemente Actualizados</h2>' +
+                '<div class="flex flex-col divide-y divide-slate-800">' +
+                  '<div class="py-3 flex flex-col gap-1"><div class="flex justify-between items-center text-[10px] font-bold"><span class="text-sky-400">VERSIÓN 4.5.1</span><span class="text-slate-400 font-medium">Ayer</span></div><h4 class="font-bold text-sm text-white">Plotter Master 8000</h4><p class="text-xs text-slate-400 leading-snug line-clamp-2">Actualización crítica de tablas de calibración de color y perfiles ICC.</p></div>' +
+                  '<div class="py-3 flex flex-col gap-1"><div class="flex justify-between items-center text-[10px] font-bold"><span class="text-sky-400">VERSIÓN 2.1.0</span><span class="text-slate-400 font-medium">Hace 3 días</span></div><h4 class="font-bold text-sm text-white">Eco-Jet Desktop v3</h4><p class="text-xs text-slate-400 leading-snug line-clamp-2">Pasos documentados de reemplazo seguro de bomba de drenaje.</p></div>' +
+                '</div>' +
+              '</div>' +
+              '<div class="bg-slate-800/80 border border-slate-700 rounded-3xl p-5 flex flex-col gap-3 relative overflow-hidden shadow-md">' +
+                '<span class="text-[10px] font-bold tracking-widest text-sky-400 uppercase">Base de Datos</span>' +
+                '<div class="flex items-baseline gap-2"><span class="text-4xl font-bold font-mono text-white">1,248</span><span class="text-xs text-slate-400 font-semibold">Instructivos</span></div>' +
+                '<p class="text-xs text-slate-400 leading-relaxed">Manuales técnicos certificados por fábrica, planos mecánicos interactivos y diagramas de circuitos para soporte nivel 4.</p>' +
+              '</div>' +
+            '</aside>' +
+          '</div>' +
+        '</div>';
+    }
+
+    function setLibraryCategory(cat) {
+      APP.library.selectedType = cat;
+      renderMainContent();
+    }
+
+    function onLibrarySearchInput(v) {
+      APP.library.search = v;
+      renderLibraryResults();
+    }
+
+    function renderLibraryResults() {
+      if (!APP.data) return;
+      var q = (APP.library.search || '').toLowerCase();
+      var type = APP.library.selectedType;
+      var filtered = APP.data.manuals.filter(function (m) {
+        var matchesType = type === 'Todos' || m.type === type;
+        var matchesSearch = m.title.toLowerCase().indexOf(q) !== -1 || m.description.toLowerCase().indexOf(q) !== -1;
+        return matchesType && matchesSearch;
+      });
+
+      var grid = byId('libraryGrid');
+      if (!grid) return;
+
+      if (filtered.length === 0) {
+        grid.innerHTML = '<div class="col-span-full py-12 text-center text-slate-400 font-medium bg-slate-900/40 rounded-3xl border border-slate-800">No hay manuales de soporte disponibles que coincidan con la búsqueda técnica.</div>';
+        refreshIcons();
+        return;
+      }
+
+      grid.innerHTML = filtered.map(function (m) {
+        var diffBadge = m.difficulty === 'HARD' ? 'bg-rose-500 text-white' : m.difficulty === 'MEDIUM' ? 'bg-amber-500 text-white' : 'bg-emerald-500 text-white';
+        return '' +
+          '<div class="group bg-slate-900/40 border border-slate-800 rounded-3xl overflow-hidden hover:shadow-lg transition-all flex flex-col h-full">' +
+            '<div class="h-44 overflow-hidden relative border-b border-slate-800 bg-slate-950">' +
+              '<img src="' + esc(m.image) + '" class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105 filter saturate-[0.8]">' +
+              '<span class="absolute top-3 right-3 px-2.5 py-1 rounded-xl text-[10px] font-bold uppercase tracking-wider shadow-sm ' + diffBadge + '">' + esc(m.difficulty) + '</span>' +
+            '</div>' +
+            '<div class="p-5 flex flex-col gap-4 flex-grow justify-between">' +
+              '<div class="space-y-1.5"><span class="text-[10px] text-sky-400 font-bold uppercase tracking-widest bg-slate-800 px-2 py-0.5 rounded">' + esc(m.type) + '</span>' +
+              '<h3 class="font-bold text-base text-white group-hover:text-sky-400 transition-colors line-clamp-1 leading-snug">' + esc(m.title) + '</h3>' +
+              '<p class="text-xs text-slate-400 leading-relaxed line-clamp-2">' + esc(m.description) + '</p></div>' +
+              '<div class="pt-4 border-t border-slate-800 flex items-center justify-between mt-auto">' +
+                '<div class="flex items-center gap-3 text-[10px] text-slate-400 font-semibold"><span class="flex items-center gap-1"><i data-lucide="calendar" class="w-3.5 h-3.5 text-sky-400"></i>' + esc(m.date) + '</span><span class="flex items-center gap-1"><i data-lucide="eye" class="w-3.5 h-3.5 text-sky-400"></i>' + m.views + ' Vistas</span></div>' +
+                '<button onclick="handleDownloadManual(\'' + esc(m.id) + '\')" class="flex items-center gap-1.5 px-3.5 py-2 bg-sky-500 text-white rounded-xl font-bold text-xs hover:bg-sky-600 hover:shadow-md transition-colors cursor-pointer"><i data-lucide="download" class="w-3.5 h-3.5"></i><span>Descargar PDF</span></button>' +
+              '</div>' +
+            '</div>' +
+          '</div>';
+      }).join('');
+      refreshIcons();
+    }
+
+    function handleDownloadManual(manualId) {
+      gsRun('downloadManual', manualId).then(function (res) {
+        if (res.success) {
+          APP.library.downloadingManual = res.manual;
+          renderToast();
+          setTimeout(function () { APP.library.downloadingManual = null; renderToast(); }, 2500);
+        }
+        loadData(false);
+      });
+    }
+
+    function renderToast() {
+      var root = byId('toast-root');
+      if (!root) return;
+      var m = APP.library.downloadingManual;
+      if (!m) { root.innerHTML = ''; return; }
+      root.innerHTML = '' +
+        '<div class="fixed bottom-6 right-6 bg-slate-900 border border-slate-800 shadow-2xl p-4 rounded-2xl z-50 flex items-center gap-3 animate-fade-in max-w-sm">' +
+          '<div class="w-8 h-8 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0"><i data-lucide="check-circle" class="w-5 h-5"></i></div>' +
+          '<div><p class="text-xs font-bold text-white">Descargando Manual</p><p class="text-[10px] text-slate-400 truncate">' + esc(m.title) + '</p><p class="text-[9px] text-sky-400 font-semibold mt-0.5">Sincronizado & guardado log de descarga en Sheets.</p></div>' +
+        '</div>';
+      refreshIcons();
+    }
+
+    // -----------------------------------------------------------------------
+    // Training
+    // -----------------------------------------------------------------------
+    function trainingHtml() {
+      var d = APP.data;
+      var avgProgress = Math.round(d.courses.reduce(function (a, c) { return a + c.progress; }, 0) / (d.courses.length || 1));
+      var circumference = 251.2;
+      var offset = circumference - (circumference * avgProgress) / 100;
+
+      var coursesGrid = d.courses.map(function (course) {
+        var btnClass = course.progress === 100 ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' :
+          course.progress > 0 ? 'bg-sky-500 text-white' : 'border border-sky-500/30 text-sky-400 hover:bg-slate-800';
+        var btnLabel = course.progress === 100 ? 'Completado' : course.progress > 0 ? 'Continuar' : 'Iniciar';
+        return '' +
+          '<div class="bg-slate-900/40 border border-slate-800 rounded-3xl overflow-hidden hover:shadow-lg transition-all flex flex-col justify-between">' +
+            '<div><div class="h-40 relative bg-slate-950 border-b border-slate-800"><img src="' + esc(course.image) + '" class="w-full h-full object-cover saturate-[0.8]">' +
+            (course.progress > 0 ? '<span class="absolute top-3 right-3 bg-slate-900/95 backdrop-blur-md px-2.5 py-1 rounded-full text-white font-bold text-[10px] border border-slate-800 shadow-sm font-mono">' + course.progress + '%</span>' : '') + '</div>' +
+            '<div class="p-5 space-y-2"><h3 class="font-bold text-base text-white line-clamp-1">' + esc(course.title) + '</h3><p class="text-xs text-slate-400 leading-relaxed line-clamp-2">' + esc(course.description) + '</p>' +
+            '<div class="flex items-center gap-4 pt-2 text-[10px] text-slate-400 font-bold"><span class="flex items-center gap-1"><i data-lucide="clock" class="w-3.5 h-3.5 text-sky-400"></i>' + esc(course.duration) + '</span><span class="flex items-center gap-1"><i data-lucide="layers" class="w-3.5 h-3.5 text-sky-400"></i>' + course.modulesCount + ' Módulos</span></div></div></div>' +
+            '<div class="p-5 pt-0"><button onclick="openCourseModal(\'' + esc(course.id) + '\')" class="w-full py-2.5 text-xs font-bold rounded-xl transition-all cursor-pointer ' + btnClass + '">' + btnLabel + '</button></div>' +
+          '</div>';
+      }).join('');
+
+      return '' +
+        '<div class="space-y-6 max-w-7xl mx-auto">' +
+          '<div class="flex flex-col gap-1 bg-slate-900/40 p-6 border border-slate-800 rounded-3xl shadow-sm"><h1 class="font-bold text-2xl text-white">Módulos de Capacitación</h1><p class="text-slate-400 text-sm">Supervise sus habilidades técnicas, complete laboratorios prácticos y obtenga certificaciones oficiales.</p></div>' +
+          '<div class="grid grid-cols-12 gap-6">' +
+            '<div class="col-span-12 lg:col-span-4 bg-slate-900/40 border border-slate-800 rounded-3xl p-6 flex flex-col items-center justify-between text-center shadow-sm">' +
+              '<h2 class="font-bold text-base text-white mb-4 w-full text-left">Mi Progreso</h2>' +
+              '<div class="relative w-44 h-44 flex items-center justify-center">' +
+                '<svg class="w-full h-full transform -rotate-95" viewBox="0 0 100 100">' +
+                  '<circle cx="50" cy="50" r="40" stroke="#1e293b" stroke-width="8" fill="transparent"></circle>' +
+                  '<circle cx="50" cy="50" r="40" stroke="#0ea5e9" stroke-width="8" fill="transparent" stroke-dasharray="251.2" stroke-dashoffset="' + offset + '" stroke-linecap="round"></circle>' +
+                '</svg>' +
+                '<div class="absolute flex flex-col items-center"><span class="text-3xl font-bold font-mono text-white">' + avgProgress + '%</span><span class="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Completado</span></div>' +
+              '</div>' +
+              '<div class="mt-6 w-full space-y-2"><div class="flex justify-between text-xs font-semibold"><span class="text-white">Próximo Hito</span><span class="text-sky-400">Técnico Senior</span></div>' +
+              '<div class="w-full h-2 bg-slate-950 rounded-full overflow-hidden border border-slate-800"><div class="h-full bg-sky-500 rounded-full transition-all duration-700" style="width:' + avgProgress + '%"></div></div></div>' +
+            '</div>' +
+            '<div class="col-span-12 lg:col-span-8 relative rounded-3xl overflow-hidden min-h-[300px] border border-slate-800 shadow-sm flex flex-col justify-end p-6 md:p-8 bg-slate-800/80 text-white">' +
+              '<div class="absolute inset-0 bg-cover bg-center mix-blend-overlay opacity-30" style="background-image:url(\'https://images.unsplash.com/photo-1581091226825-a6a2a5aee158?auto=format&fit=crop&w=800&q=80\')"></div>' +
+              '<div class="relative z-10 space-y-4 max-w-xl"><span class="inline-block px-2.5 py-1 bg-sky-500 text-white font-bold text-[9px] rounded-full uppercase tracking-widest">Nuevo Módulo</span>' +
+                '<h3 class="text-2xl md:text-3xl font-bold leading-tight">Optimización de Inyectores UV-C</h3>' +
+                '<p class="text-slate-300 text-sm leading-relaxed">Domina la última tecnología de curado ultravioleta de alto rendimiento para plóters planos de alta velocidad.</p>' +
+                '<button onclick="openCourseModal(\'' + esc((d.courses[1] || d.courses[0]).id) + '\')" class="bg-sky-500 text-white hover:bg-sky-600 px-5 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 cursor-pointer w-fit shadow-md"><span>Continuar Aprendizaje</span><i data-lucide="arrow-right" class="w-4 h-4"></i></button>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="grid grid-cols-12 gap-6">' +
+            '<div class="col-span-12 lg:col-span-9 space-y-6"><h2 class="font-bold text-lg text-white flex items-center gap-2"><i data-lucide="book-open" class="w-5 h-5 text-sky-400"></i> Cursos Disponibles</h2>' +
+              '<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">' + coursesGrid + '</div>' +
+            '</div>' +
+            '<div class="col-span-12 lg:col-span-3 space-y-6">' +
+              '<div class="bg-slate-900/40 border border-slate-800 rounded-3xl p-5 space-y-4 shadow-sm"><h2 class="font-bold text-base text-white border-b border-slate-800 pb-2">Certificaciones</h2>' +
+                '<div class="space-y-3">' +
+                  '<div class="flex items-center gap-3 p-3 bg-slate-800/80 border border-slate-700/80 rounded-2xl shadow-sm"><div class="w-10 h-10 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center justify-center rounded-full shrink-0"><i data-lucide="check-circle" class="w-5 h-5"></i></div><div><p class="font-bold text-xs text-white">Operador Pro</p><p class="text-[10px] text-slate-500">Obtenido el 12/03/24</p></div></div>' +
+                  '<div class="flex items-center gap-3 p-3 bg-slate-800/80 border border-slate-700/80 rounded-2xl shadow-sm"><div class="w-10 h-10 bg-sky-500/10 text-sky-400 border border-sky-500/20 flex items-center justify-center rounded-full shrink-0"><i data-lucide="star" class="w-5 h-5"></i></div><div><p class="font-bold text-xs text-white">Calibración UV</p><p class="text-[10px] text-slate-500">Obtenido el 05/01/24</p></div></div>' +
+                  '<div class="flex items-center gap-3 p-3 bg-slate-900/20 border border-slate-800 border-dashed rounded-2xl opacity-60"><div class="w-10 h-10 bg-gray-800 flex items-center justify-center rounded-full text-gray-500 shrink-0"><i data-lucide="lock" class="w-5 h-5"></i></div><div><p class="font-bold text-xs text-gray-500">Técnico Máster</p><p class="text-[10px] text-gray-500">Completa 10 cursos</p></div></div>' +
+                '</div>' +
+              '</div>' +
+              '<div class="bg-slate-800/80 border border-slate-700 text-white rounded-3xl p-5 space-y-3 shadow-md relative overflow-hidden">' +
+                '<h4 class="font-bold text-sm">¿Necesitas ayuda?</h4><p class="text-xs text-slate-400 leading-relaxed">Agenda una sesión remota personalizada con un instructor de laboratorio de PrintTech.</p>' +
+                '<button id="tutorRequestBtn" onclick="requestTutorSession()" class="w-full py-2 bg-sky-500 hover:bg-sky-600 text-white font-bold rounded-xl text-xs transition-colors cursor-pointer text-center">Solicitar Tutoría</button>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+    }
+
+    function requestTutorSession() {
+      var btn = byId('tutorRequestBtn');
+      if (btn) btn.textContent = '✓ Solicitud Registrada';
+      setTimeout(function () { if (btn) btn.textContent = 'Solicitar Tutoría'; }, 3000);
+    }
+
+    function openCourseModal(courseId) {
+      APP.training.selectedCourseId = courseId;
+      renderModals();
+    }
+
+    function closeCourseModal() {
+      APP.training.selectedCourseId = null;
+      renderModals();
+    }
+
+    function onCourseProgressInput(courseId, v) {
+      var label = byId('courseProgressLabel');
+      if (label) label.textContent = v + '%';
+    }
+
+    function onCourseProgressChange(courseId, v) {
+      gsRun('updateCourseProgress', courseId, Number(v)).then(function () { loadData(false); });
+    }
+
+    function courseModalHtml() {
+      var course = APP.data.courses.filter(function (c) { return c.id === APP.training.selectedCourseId; })[0];
+      if (!course) return '';
+      return '' +
+        '<div class="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">' +
+          '<div class="bg-slate-900 w-full max-w-md rounded-3xl border border-slate-800 shadow-2xl overflow-hidden animate-fade-in">' +
+            '<div class="bg-slate-800 p-5 border-b border-slate-700 text-white flex justify-between items-center">' +
+              '<div><h3 class="font-bold text-base">Laboratorio de Simulación</h3><p class="text-xs text-slate-400 mt-0.5">Control de avance y práctica técnica.</p></div>' +
+              '<button onclick="closeCourseModal()" class="p-1.5 hover:bg-white/10 rounded-xl text-white cursor-pointer"><span class="font-bold text-sm">Cerrar</span></button>' +
+            '</div>' +
+            '<div class="p-6 space-y-4">' +
+              '<div class="flex gap-4 p-3 bg-slate-950 rounded-2xl border border-slate-800"><img src="' + esc(course.image) + '" class="w-16 h-16 rounded-xl object-cover shrink-0">' +
+              '<div><h4 class="font-bold text-sm text-white">' + esc(course.title) + '</h4><p class="text-[11px] text-slate-400 leading-tight mt-1">' + esc(course.description) + '</p></div></div>' +
+              '<div class="space-y-2 pt-2"><div class="flex justify-between items-center text-xs"><span class="font-bold text-white">Simular Avance de Aprendizaje</span><span id="courseProgressLabel" class="font-mono font-bold text-sky-400">' + course.progress + '%</span></div>' +
+              '<input type="range" min="0" max="100" step="5" value="' + course.progress + '" oninput="onCourseProgressInput(\'' + esc(course.id) + '\', this.value)" onchange="onCourseProgressChange(\'' + esc(course.id) + '\', this.value)" class="w-full accent-sky-500 h-2 bg-slate-950 rounded-lg appearance-none cursor-pointer">' +
+              '<div class="flex justify-between text-[9px] text-slate-500 font-bold uppercase"><span>No Iniciado</span><span>En progreso</span><span>Certificado</span></div></div>' +
+              '<div class="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-3 text-emerald-400 text-xs flex gap-2.5 items-center"><i data-lucide="activity" class="w-4 h-4 text-emerald-600 shrink-0"></i><span>Cualquier cambio guardado se sincroniza con el historial de la base de datos de Google Sheets.</span></div>' +
+            '</div>' +
+            '<div class="p-4 border-t border-slate-800 bg-slate-950 flex justify-between items-center"><span class="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Duración: ' + esc(course.duration) + '</span><button onclick="closeCourseModal()" class="px-4 py-2 bg-sky-500 hover:bg-sky-600 text-white text-xs font-bold rounded-xl cursor-pointer">Cerrar Práctica</button></div>' +
+          '</div>' +
+        '</div>';
+    }
+
+    // -----------------------------------------------------------------------
+    // Settings & Sheets
+    // -----------------------------------------------------------------------
+    function getPermissionsForRole(role) {
+      if (role === 'Admin Tech') {
+        return ['Acceso completo de administrador', 'Crear, modificar y eliminar cualquier caso técnico', 'Modificar reglas de validación en tiempo real', 'Configurar credenciales del Spreadsheet de Google Sheets', 'Gestionar cuentas de técnicos locales'];
+      }
+      if (role === 'Técnico Nvl 3') {
+        return ['Acceso intermedio de diagnóstico', 'Crear nuevos casos técnicos', 'Modificar cualquier caso técnico', 'Ver biblioteca y descargar manuales', '✕ Prohibido eliminar registros en Google Sheets', '✕ Prohibido modificar reglas de validación o credenciales de Sheets'];
+      }
+      if (role === 'Técnico Nvl 1') {
+        return ['Acceso básico de operador', 'Crear nuevos casos técnicos', 'Modificar únicamente casos técnicos reportados por sí mismo', 'Ver biblioteca y descargar manuales', '✕ Prohibido modificar casos de otros técnicos', '✕ Prohibido eliminar cualquier caso', '✕ Prohibido alterar configuración o validaciones'];
+      }
+      return [];
+    }
+
+    function settingsHtml() {
+      var d = APP.data;
+      var activeUser = getActiveUser();
+      var isAdmin = activeUser.role === 'Admin Tech';
+      var gs = d.googleSheetsSettings;
+      var rules = d.validationRules;
+
+      var sheetHeaderRow = gs.simulatedSheet[0] || [];
+      var sheetHeaderHtml = sheetHeaderRow.map(function (h, i) {
+        return '<th class="px-4 py-2 text-slate-300 border-r border-slate-800 font-bold uppercase tracking-wider">' + String.fromCharCode(65 + i) + ' (' + esc(h) + ')</th>';
+      }).join('');
+      var sheetRowsHtml = gs.simulatedSheet.slice(1).map(function (row, i) {
+        return '<tr class="hover:bg-slate-800/20 transition-colors"><td class="px-3 py-2 border-r border-slate-800 font-bold text-slate-500 bg-slate-900 text-center w-8">' + (i + 2) + '</td>' +
+          row.map(function (cell) { return '<td class="px-4 py-2 border-r border-slate-800 truncate max-w-[150px] font-medium text-slate-300">' + esc(cell) + '</td>'; }).join('') + '</tr>';
+      }).join('');
+
+      var logsHtml = gs.syncLogs.map(function (log) {
+        var cls = log.level === 'success' ? 'text-emerald-400' : log.level === 'error' ? 'text-rose-400' : log.level === 'warning' ? 'text-amber-400' : 'text-sky-300';
+        return '<div class="leading-tight"><span class="text-gray-500 mr-2">[' + new Date(log.timestamp).toLocaleTimeString() + ']</span><span class="mr-2 font-bold uppercase ' + cls + '">' + esc(log.level) + ':</span><span class="text-gray-200">' + esc(log.message) + '</span></div>';
+      }).join('');
+
+      var usersCards = d.users.map(function (u) {
+        var isSelected = d.activeUserId === u.id;
+        var perms = getPermissionsForRole(u.role).map(function (p) {
+          return '<li class="text-[10px] leading-tight ' + (p.indexOf('✕') === 0 ? 'text-rose-400 font-medium' : 'text-slate-300') + '">• ' + esc(p) + '</li>';
+        }).join('');
+        return '' +
+          '<div onclick="handleSelectUser(\'' + u.id + '\')" class="p-4 rounded-2xl border-2 cursor-pointer transition-all ' + (isSelected ? 'border-sky-500 bg-slate-800/80 shadow-sm' : 'border-slate-800 hover:border-sky-500/50 bg-slate-900/20') + '">' +
+            '<div class="flex items-center gap-3 mb-2"><img src="' + esc(u.avatar) + '" class="w-9 h-9 rounded-full object-cover border-2 border-sky-500 shrink-0">' +
+            '<div><div class="flex items-center gap-1.5"><p class="font-bold text-xs text-white">' + esc(u.name) + '</p>' + (isSelected ? '<span class="bg-sky-500 text-white text-[8px] font-bold px-1.5 py-0.5 rounded-full uppercase">Activo</span>' : '') + '</div>' +
+            '<p class="text-[10px] text-slate-400 font-bold leading-none uppercase mt-0.5">' + esc(u.role) + '</p></div></div>' +
+            '<ul class="space-y-1 pl-2 border-l border-slate-800 mt-3">' + perms + '</ul>' +
+          '</div>';
+      }).join('');
+
+      return '' +
+        '<div class="space-y-6 max-w-7xl mx-auto">' +
+          '<div class="flex flex-col gap-1 bg-slate-900/40 p-6 border border-slate-800 rounded-3xl shadow-sm"><h1 class="font-bold text-2xl text-white">Configuración & Integración</h1><p class="text-slate-400 text-sm">Administre la sincronización con Google Sheets, defina validaciones técnicas y simule accesos restringidos por rol.</p></div>' +
+          '<div class="grid grid-cols-1 lg:grid-cols-12 gap-6">' +
+            '<div class="lg:col-span-8 space-y-6">' +
+              '<div class="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 shadow-sm space-y-6">' +
+                '<div class="flex justify-between items-start border-b border-slate-800 pb-4"><div><h3 class="font-bold text-lg text-white flex items-center gap-2"><i data-lucide="database" class="w-5 h-5 text-sky-400"></i>Sincronización con Google Sheets</h3><p class="text-xs text-slate-400 mt-1">Conecte su portal técnico a una hoja de cálculo como base de datos central persistente.</p></div></div>' +
+                (!isAdmin ? '<div class="bg-rose-500/10 border border-rose-500/20 rounded-2xl p-4 text-rose-400 text-xs font-semibold flex items-center gap-3"><i data-lucide="shield-alert" class="w-5 h-5 shrink-0"></i><span>Modo de Vista de Lectura: Solo el rol de Administrador (Admin Tech) tiene permisos para editar la configuración de Google Sheets.</span></div>' : '') +
+                '<form onsubmit="submitSheetsForm(event)" class="grid grid-cols-1 md:grid-cols-2 gap-4" id="sheetsForm">' +
+                  '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Google Spreadsheet ID</label><input id="settingsSpreadsheetId" type="text" value="' + esc(gs.spreadsheetId) + '" ' + (!isAdmin ? 'disabled' : '') + ' class="w-full bg-slate-800 border border-slate-700 rounded-xl py-2 px-3 text-xs font-mono text-white focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-50"></div>' +
+                  '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Nombre de la Hoja (Tab)</label><input id="settingsSheetName" type="text" value="' + esc(gs.sheetName) + '" ' + (!isAdmin ? 'disabled' : '') + ' class="w-full bg-slate-800 border border-slate-700 rounded-xl py-2 px-3 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-50"></div>' +
+                  '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Rango de Datos</label><input id="settingsRange" type="text" value="' + esc(gs.range) + '" ' + (!isAdmin ? 'disabled' : '') + ' class="w-full bg-slate-800 border border-slate-700 rounded-xl py-2 px-3 text-xs font-mono text-white focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-50"></div>' +
+                  '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Google Cloud API Key / Credencial</label><div class="relative"><input id="settingsApiKey" type="password" value="' + esc(gs.apiKey) + '" ' + (!isAdmin ? 'disabled' : '') + ' placeholder="Opcional" class="w-full bg-slate-800 border border-slate-700 rounded-xl py-2 pl-3 pr-10 text-xs font-mono text-white focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-50">' +
+                    '<button type="button" onclick="toggleApiKeyVisibility()" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"><i id="apiKeyEyeIcon" data-lucide="eye" class="w-4 h-4"></i></button></div></div>' +
+                  '<div class="md:col-span-2 flex items-center justify-between p-3 bg-slate-800/60 rounded-xl"><div class="space-y-0.5"><p class="text-xs font-bold text-white">Sincronización en Tiempo Real Automatizada</p><p class="text-[10px] text-slate-400">Cada acción de creación, edición o eliminación actualiza celdas de forma instantánea.</p></div>' +
+                    '<input id="settingsAutoSync" type="checkbox" ' + (gs.autoSyncEnabled ? 'checked' : '') + ' ' + (!isAdmin ? 'disabled' : '') + ' class="w-10 h-5 bg-gray-700 checked:bg-sky-500 rounded-full appearance-none cursor-pointer relative before:content-[\'\'] before:absolute before:w-4 before:h-4 before:bg-white before:rounded-full before:transition-all before:left-0.5 before:top-0.5 checked:before:translate-x-5 border border-gray-600"></div>' +
+                  '<div class="md:col-span-2 flex justify-between items-center pt-2"><div class="text-[11px] text-sky-400 font-bold flex items-center gap-1"><i data-lucide="info" class="w-3.5 h-3.5"></i> Canales seguros proxy SSL habilitados</div>' +
+                    (isAdmin ? '<button type="submit" class="bg-sky-500 hover:opacity-95 text-white px-5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer"><span>Guardar Configuración de Sheets</span></button>' : '') + '</div>' +
+                  '<div id="sheetsSaveSuccessMsg" class="hidden md:col-span-2 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 px-4 py-2.5 rounded-xl text-xs font-semibold items-center gap-2"><i data-lucide="check-circle" class="w-4 h-4 text-emerald-400"></i><span>Configuración de Google Sheets guardada con éxito.</span></div>' +
+                '</form>' +
+              '</div>' +
+              '<div class="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 shadow-sm space-y-4">' +
+                '<div class="flex justify-between items-center border-b border-slate-800 pb-3"><div><h3 class="font-bold text-base text-white flex items-center gap-2"><i data-lucide="grid" class="w-5 h-5 text-sky-400"></i>Visualizador de Hoja de Cálculo (Google Sheets Grid)</h3><p class="text-xs text-slate-400">Representación en tiempo real de las filas y celdas del spreadsheet de Google Sheets.</p></div>' +
+                  '<button onclick="handleSyncNow()" class="px-3 py-1.5 border border-slate-800 rounded-xl text-[10px] font-bold text-sky-400 flex items-center gap-1.5 hover:bg-slate-800 cursor-pointer"><i data-lucide="refresh-cw" class="w-3.5 h-3.5 ' + (APP.isSyncing ? 'animate-spin' : '') + '"></i><span>Re-vincular</span></button></div>' +
+                '<div class="overflow-x-auto border border-slate-800 rounded-xl custom-scrollbar"><table class="w-full text-left border-collapse font-mono text-[10px]"><thead><tr class="bg-slate-950 border-b border-slate-800"><th class="px-3 py-2 text-slate-500 border-r border-slate-800 text-center w-8 bg-slate-900"></th>' + sheetHeaderHtml + '</tr></thead><tbody class="divide-y divide-slate-800">' + sheetRowsHtml + '</tbody></table></div>' +
+                '<p class="text-[10px] text-slate-400 font-bold flex items-center gap-1 leading-none"><i data-lucide="file-spreadsheet" class="w-4 h-4 text-sky-400"></i>Sincronizado: Hoja "' + esc(gs.sheetName) + '" | Rango ' + esc(gs.range) + ' | ' + d.cases.length + ' registros cargados.</p>' +
+              '</div>' +
+              '<div class="bg-slate-950 border border-slate-800/80 text-white rounded-3xl p-5 shadow-md"><h3 class="font-bold text-sm text-sky-400 flex items-center gap-2 mb-3"><i data-lucide="terminal" class="w-4 h-4 text-sky-400"></i>Consola de Eventos y Logs de Sincronización</h3>' +
+                '<div class="font-mono text-[10px] space-y-1.5 max-h-40 overflow-y-auto custom-scrollbar pr-1 bg-slate-900/60 p-3 rounded-2xl border border-slate-800">' + logsHtml + '</div></div>' +
+            '</div>' +
+            '<div class="lg:col-span-4 space-y-6">' +
+              '<div class="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 shadow-sm space-y-5"><div><h3 class="font-bold text-base text-white flex items-center gap-2"><i data-lucide="shield-alert" class="w-5 h-5 text-sky-400"></i>Permisos Locales por Rol</h3><p class="text-xs text-slate-400 mt-1">Haga clic en un técnico para cambiar la sesión y simular accesos restringidos en tiempo real.</p></div>' +
+                '<div class="space-y-4">' + usersCards + '</div>' +
+              '</div>' +
+              '<div class="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 shadow-sm space-y-4">' +
+                '<div><h3 class="font-bold text-base text-white flex items-center gap-2"><i data-lucide="sliders" class="w-5 h-5 text-sky-400"></i>Reglas de Validación de Captura</h3><p class="text-xs text-slate-400 mt-1">Configuración en tiempo real para evitar errores de captura en el formulario de incidentes.</p></div>' +
+                (!isAdmin ? '<div class="p-3 bg-rose-500/10 border border-rose-500/20 rounded-xl text-rose-400 text-[10px] font-semibold flex items-center gap-2"><i data-lucide="lock" class="w-4 h-4 shrink-0"></i><span>Se requieren permisos de Admin Tech para alterar estas reglas.</span></div>' : '') +
+                '<form onsubmit="submitRulesForm(event)" class="space-y-3">' +
+                  '<div class="space-y-1"><label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">ID Validación Regex</label><input id="rulesCaseIdRegex" type="text" value="' + esc(rules.caseIdRegex) + '" ' + (!isAdmin ? 'disabled' : '') + ' class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-50"></div>' +
+                  '<div class="space-y-1"><label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Mínimo Letras Nombre Cliente</label><input id="rulesMinClientLength" type="number" value="' + rules.minClientLength + '" ' + (!isAdmin ? 'disabled' : '') + ' class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-xs focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-50"></div>' +
+                  '<div class="flex items-center gap-2.5"><input id="rulesAllowSpecialChars" type="checkbox" ' + (rules.allowSpecialCharsInClient ? 'checked' : '') + ' ' + (!isAdmin ? 'disabled' : '') + ' class="rounded text-sky-500 focus:ring-sky-500 h-4 w-4"><label class="text-xs text-slate-300 cursor-pointer">Permitir caracteres especiales en Cliente</label></div>' +
+                  '<div class="flex items-center gap-2.5"><input id="rulesRequireModel" type="checkbox" ' + (rules.requireModelSelection ? 'checked' : '') + ' ' + (!isAdmin ? 'disabled' : '') + ' class="rounded text-sky-500 focus:ring-sky-500 h-4 w-4"><label class="text-xs text-slate-300 cursor-pointer">Exigir selección de impresora válida</label></div>' +
+                  '<div class="flex items-center gap-2.5"><input id="rulesRequireDesc" type="checkbox" ' + (rules.requireDescription ? 'checked' : '') + ' ' + (!isAdmin ? 'disabled' : '') + ' class="rounded text-sky-500 focus:ring-sky-500 h-4 w-4"><label class="text-xs text-slate-300 cursor-pointer">Exigir descripción de incidente (&gt;10 letras)</label></div>' +
+                  (isAdmin ? '<button type="submit" class="w-full bg-sky-500 hover:bg-sky-600 text-white py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"><span>Aplicar Reglas de Formulario</span></button>' : '') +
+                  '<div id="rulesSaveSuccessMsg" class="hidden bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 px-3 py-1.5 rounded-xl text-[10px] font-semibold items-center gap-2"><i data-lucide="check-circle" class="w-3.5 h-3.5 text-emerald-400"></i><span>Validaciones de captura modificadas.</span></div>' +
+                '</form>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+    }
+
+    function toggleApiKeyVisibility() {
+      var input = byId('settingsApiKey');
+      var icon = byId('apiKeyEyeIcon');
+      if (!input) return;
+      if (input.type === 'password') {
+        input.type = 'text';
+        if (icon) icon.setAttribute('data-lucide', 'eye-off');
+      } else {
+        input.type = 'password';
+        if (icon) icon.setAttribute('data-lucide', 'eye');
+      }
+      refreshIcons();
+    }
+
+    function submitSheetsForm(ev) {
+      ev.preventDefault();
+      var payload = {
+        spreadsheetId: val('settingsSpreadsheetId'),
+        sheetName: val('settingsSheetName'),
+        range: val('settingsRange'),
+        apiKey: val('settingsApiKey'),
+        autoSyncEnabled: checked('settingsAutoSync')
+      };
+      gsRun('saveGoogleSheetsSettings', payload).then(function (res) {
+        if (res.success) {
+          var msg = byId('sheetsSaveSuccessMsg');
+          if (msg) { msg.classList.remove('hidden'); msg.classList.add('flex'); }
+          setTimeout(function () { if (msg) { msg.classList.add('hidden'); msg.classList.remove('flex'); } }, 3000);
+          loadData(false);
+        } else {
+          alert(res.error || 'No se pudo guardar la configuración.');
+        }
+      });
+    }
+
+    function submitRulesForm(ev) {
+      ev.preventDefault();
+      var payload = {
+        caseIdRegex: val('rulesCaseIdRegex'),
+        minClientLength: Number(val('rulesMinClientLength')),
+        allowSpecialCharsInClient: checked('rulesAllowSpecialChars'),
+        requireModelSelection: checked('rulesRequireModel'),
+        requireDescription: checked('rulesRequireDesc')
+      };
+      gsRun('saveValidationRules', payload).then(function (res) {
+        if (res.success) {
+          var msg = byId('rulesSaveSuccessMsg');
+          if (msg) { msg.classList.remove('hidden'); msg.classList.add('flex'); }
+          setTimeout(function () { if (msg) { msg.classList.add('hidden'); msg.classList.remove('flex'); } }, 3000);
+          loadData(false);
+        } else {
+          alert(res.error || 'No se pudieron guardar las reglas.');
+        }
+      });
+    }
+
+    // -----------------------------------------------------------------------
+    // Modals root
+    // -----------------------------------------------------------------------
+    function renderModals() {
+      var root = byId('modals-root');
+      if (!root) return;
+      var html = '';
+      if (APP.editingCase) html += caseModalHtml();
+      if (APP.inspectingLogsCase) html += auditModalHtml();
+      if (APP.training.selectedCourseId) html += courseModalHtml();
+      root.innerHTML = html;
+      refreshIcons();
+    }
+  </script>
+</body>
+</html>
