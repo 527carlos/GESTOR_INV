@@ -28,6 +28,7 @@
     @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
     .animate-fade-in { animation: fadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
     input[type="range"].accent-sky-500 { accent-color: #0ea5e9; }
+    input[type="file"]::file-selector-button { cursor: pointer; }
   </style>
 </head>
 <body>
@@ -46,14 +47,17 @@
       { id: 'library', label: 'Instructivos', icon: 'book-open' },
       { id: 'training', label: 'Capacitación', icon: 'graduation-cap' },
       { id: 'cases', label: 'Gestión de Casos', icon: 'sliders-horizontal' },
+      { id: 'content', label: 'Contenido', icon: 'folder-cog' },
       { id: 'settings', label: 'Sheets & Roles', icon: 'settings' }
     ];
     var LIBRARY_CATEGORIES = ['Todos', 'Inyección de Tinta', 'Láser', 'Gran Formato', 'Térmicas'];
+    var TOKEN_STORAGE_KEY = 'isera_token';
 
     // -----------------------------------------------------------------------
     // App state
     // -----------------------------------------------------------------------
     var APP = {
+      session: { token: null, user: null },
       data: null,
       activeTab: 'dashboard',
       isSyncing: false,
@@ -61,8 +65,14 @@
       formError: '',
       isSubmitting: false,
       inspectingLogsCase: null,
-      library: { selectedType: 'Todos', search: '', downloadingManual: null },
-      training: { selectedCourseId: null, sessionRequested: false }
+      library: { selectedType: 'Todos', resourceType: 'Manual', search: '', downloadingManual: null },
+      training: { selectedCourseId: null, sessionRequested: false, playingVideoId: null },
+      content: {
+        editingManual: null, manualFormError: '', manualUploadMode: 'file', pendingManualFile: null,
+        editingVideo: null, videoFormError: '', videoUploadMode: 'file', pendingVideoFile: null,
+        isSubmitting: false
+      },
+      usersMgmt: { editingUser: null, formError: '', isSubmitting: false }
     };
 
     // -----------------------------------------------------------------------
@@ -80,18 +90,25 @@
       return new Promise(function (resolve, reject) {
         var runner = google.script.run
           .withSuccessHandler(resolve)
-          .withFailureHandler(function (err) { reject(err); });
+          .withFailureHandler(function (err) {
+            if (err && typeof err.message === 'string' && err.message.indexOf('AUTH:') === 0) {
+              forceLogout(err.message.replace('AUTH:', '').trim());
+            }
+            reject(err);
+          });
         runner[fnName].apply(runner, args);
       });
     }
 
+    function errorMessageOf_(err) {
+      if (!err) return 'Error desconocido.';
+      if (typeof err === 'string') return err;
+      return err.message || String(err);
+    }
+
     function getActiveUser() {
-      if (!APP.data) return null;
-      if (!APP.data.users || APP.data.users.length === 0) {
-        throw new Error('La pestaña "Usuarios" de la hoja de cálculo está vacía. Ejecuta initializeSpreadsheet desde el editor de Apps Script.');
-      }
-      var found = APP.data.users.filter(function (u) { return u.id === APP.data.activeUserId; })[0];
-      return found || APP.data.users[0];
+      if (APP.data && APP.data.currentUser) return APP.data.currentUser;
+      return APP.session.user;
     }
 
     function relTimeIso(iso) {
@@ -109,28 +126,56 @@
 
     function refreshIcons() { if (window.lucide) lucide.createIcons(); }
 
+    function readFileAsBase64_(file, onDone) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        var base64Data = String(reader.result).split(',')[1];
+        onDone({ base64Data: base64Data, filename: file.name, mimeType: file.type || 'application/octet-stream' });
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function extractYouTubeId_(url) {
+      var m = String(url || '').match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/))([a-zA-Z0-9_-]{6,})/);
+      return m ? m[1] : null;
+    }
+
     // -----------------------------------------------------------------------
-    // Boot + polling
+    // Boot, session and polling
     // -----------------------------------------------------------------------
     document.addEventListener('DOMContentLoaded', function () {
-      renderAll();
-      loadData(true);
-      setInterval(function () { loadData(false); }, 9000);
+      var savedToken = null;
+      try { savedToken = sessionStorage.getItem(TOKEN_STORAGE_KEY); } catch (e) { /* almacenamiento no disponible */ }
+      if (savedToken) {
+        APP.session.token = savedToken;
+        renderAll();
+        loadData(true);
+      } else {
+        renderAll();
+      }
+      setInterval(function () {
+        if (APP.session.token) loadData(false);
+      }, 9000);
     });
 
     function loadData(showSpinner) {
+      if (!APP.session.token) { renderAll(); return; }
       if (showSpinner) { APP.isSyncing = true; }
-      gsRun('getInitialData').then(function (data) {
+      gsRun('getInitialData', APP.session.token).then(function (data) {
         APP.data = data;
+        APP.session.user = data.currentUser;
         if (showSpinner) {
           setTimeout(function () { APP.isSyncing = false; renderAll(); }, 500);
-        } else if (!APP.editingCase && !APP.inspectingLogsCase && !APP.training.selectedCourseId) {
+        } else if (!APP.editingCase && !APP.inspectingLogsCase && !APP.training.selectedCourseId &&
+          !APP.content.editingManual && !APP.content.editingVideo && !APP.usersMgmt.editingUser) {
           renderAll();
         }
       }).catch(function (err) {
         console.error('Error cargando datos:', err);
         APP.isSyncing = false;
-        renderLoadError(err);
+        if (!(err && err.message && err.message.indexOf('AUTH:') === 0)) {
+          renderLoadError(err);
+        }
       });
     }
 
@@ -144,10 +189,71 @@
       loadData(true);
     }
 
-    function errorMessageOf_(err) {
-      if (!err) return 'Error desconocido.';
-      if (typeof err === 'string') return err;
-      return err.message || String(err);
+    function forceLogout(message) {
+      try { sessionStorage.removeItem(TOKEN_STORAGE_KEY); } catch (e) { /* almacenamiento no disponible */ }
+      APP.session = { token: null, user: null };
+      APP.data = null;
+      renderAll();
+      if (message) {
+        setTimeout(function () {
+          var el = byId('loginError');
+          if (el) { el.textContent = message; el.classList.remove('hidden'); }
+        }, 50);
+      }
+    }
+
+    function handleLogout() {
+      gsRun('logout', APP.session.token).catch(function () {});
+      try { sessionStorage.removeItem(TOKEN_STORAGE_KEY); } catch (e) { /* almacenamiento no disponible */ }
+      APP.session = { token: null, user: null };
+      APP.data = null;
+      renderAll();
+    }
+
+    function submitLogin(ev) {
+      ev.preventDefault();
+      var username = val('loginUsername');
+      var password = val('loginPassword');
+      var btn = byId('loginSubmitBtn');
+      var errEl = byId('loginError');
+      if (errEl) errEl.classList.add('hidden');
+      if (btn) btn.disabled = true;
+      gsRun('login', username, password).then(function (res) {
+        if (btn) btn.disabled = false;
+        if (res.success) {
+          APP.session.token = res.token;
+          APP.session.user = res.user;
+          try { sessionStorage.setItem(TOKEN_STORAGE_KEY, res.token); } catch (e) { /* almacenamiento no disponible */ }
+          loadData(true);
+        } else if (errEl) {
+          errEl.textContent = res.error;
+          errEl.classList.remove('hidden');
+        }
+      }).catch(function (err) {
+        if (btn) btn.disabled = false;
+        if (errEl) { errEl.textContent = errorMessageOf_(err); errEl.classList.remove('hidden'); }
+      });
+    }
+
+    function loginScreenHtml() {
+      return '' +
+        '<div class="min-h-screen bg-slate-950 flex items-center justify-center p-4">' +
+          '<div class="w-full max-w-sm bg-slate-900/60 border border-slate-800 rounded-3xl shadow-2xl p-8 space-y-6">' +
+            '<div class="flex flex-col items-center gap-3 text-center">' +
+              '<div class="w-14 h-14 bg-sky-500/10 flex items-center justify-center rounded-2xl border border-sky-500/20 text-sky-400"><i data-lucide="database" class="w-7 h-7"></i></div>' +
+              '<div><h1 class="font-bold text-xl text-white tracking-tight">ISERA Portal</h1><p class="text-xs text-slate-400 font-semibold tracking-wider uppercase mt-0.5">PrintTech Systems</p></div>' +
+            '</div>' +
+            '<form onsubmit="submitLogin(event)" class="space-y-4">' +
+              '<div id="loginError" class="hidden bg-rose-500/10 border border-rose-500/20 text-rose-400 px-4 py-2.5 rounded-xl text-xs font-semibold"></div>' +
+              '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Usuario</label>' +
+                '<input id="loginUsername" type="text" autocomplete="username" placeholder="usuario" class="w-full bg-slate-800 border border-slate-700 rounded-xl py-2.5 px-3 text-sm text-white focus:outline-none focus:ring-1 focus:ring-sky-500" required></div>' +
+              '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Contraseña</label>' +
+                '<input id="loginPassword" type="password" autocomplete="current-password" placeholder="••••••••" class="w-full bg-slate-800 border border-slate-700 rounded-xl py-2.5 px-3 text-sm text-white focus:outline-none focus:ring-1 focus:ring-sky-500" required></div>' +
+              '<button id="loginSubmitBtn" type="submit" class="w-full bg-sky-500 hover:bg-sky-600 text-white py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"><i data-lucide="log-in" class="w-4 h-4"></i>Iniciar sesión</button>' +
+            '</form>' +
+            '<p class="text-[10px] text-slate-500 text-center leading-relaxed">Acceso restringido al personal técnico de PrintTech. Contacta a tu administrador si no tienes credenciales.</p>' +
+          '</div>' +
+        '</div>';
     }
 
     function renderLoadError(err) {
@@ -168,6 +274,11 @@
     // -----------------------------------------------------------------------
     function renderAll() {
       var root = byId('root');
+      if (!APP.session.token) {
+        root.innerHTML = loginScreenHtml();
+        refreshIcons();
+        return;
+      }
       if (!APP.data) {
         root.innerHTML = loadingScreenHtml();
         refreshIcons();
@@ -231,15 +342,6 @@
     function sidebarHtml() {
       var d = APP.data;
       var activeUser = getActiveUser();
-      var usersMenu = d.users.map(function (u) {
-        var sel = d.activeUserId === u.id;
-        return '' +
-          '<button onclick="handleSelectUser(\'' + u.id + '\')" class="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-left transition-colors ' +
-            (sel ? 'bg-slate-800 font-semibold text-white' : 'hover:bg-slate-800/50 text-slate-300') + '">' +
-            '<img src="' + esc(u.avatar) + '" class="w-6 h-6 rounded-full object-cover">' +
-            '<div><p class="font-semibold leading-none">' + esc(u.name) + '</p><p class="text-[9px] text-slate-400">' + esc(u.role) + '</p></div>' +
-          '</button>';
-      }).join('');
 
       return '' +
         '<aside class="hidden md:flex flex-col w-64 bg-slate-900/40 backdrop-blur border-r border-slate-800 fixed h-screen z-30">' +
@@ -251,10 +353,10 @@
               '<p class="text-[10px] text-slate-400 font-semibold tracking-wider uppercase mt-0.5">PrintTech Systems</p></div>' +
             '</div>' +
             '<div class="mt-3 flex items-center justify-between text-[10px] text-slate-500 font-mono">' +
-              '<span class="flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>v4.2.1-gas</span>' +
+              '<span class="flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>v5.0.0-gas</span>' +
             '</div>' +
           '</div>' +
-          '<nav class="flex-1 px-3 py-4 space-y-1">' + navButtonsHtml('') + '</nav>' +
+          '<nav class="flex-1 px-3 py-4 space-y-1 overflow-y-auto custom-scrollbar">' + navButtonsHtml('') + '</nav>' +
           '<div class="p-4 mx-3 mb-4 bg-slate-900/50 border border-slate-800 rounded-2xl">' +
             '<div class="flex items-center justify-between mb-2">' +
               '<span class="text-[11px] font-bold text-slate-400 tracking-wide uppercase flex items-center gap-1.5"><i data-lucide="database-zap" class="w-3.5 h-3.5 text-sky-400"></i> Sheets Sync</span>' +
@@ -271,11 +373,11 @@
               '<button onclick="byId(\'userDropdownPopup\').classList.toggle(\'hidden\')" class="w-full flex items-center gap-3 p-1.5 rounded-xl hover:bg-slate-800/50 transition-colors text-left">' +
                 '<img src="' + esc(activeUser.avatar) + '" class="w-10 h-10 rounded-full object-cover border-2 border-sky-400">' +
                 '<div class="flex-1 min-w-0"><p class="text-xs font-bold truncate text-slate-200">' + esc(activeUser.name) + '</p><p class="text-[10px] text-slate-400 font-semibold tracking-wider uppercase">' + esc(activeUser.role) + '</p></div>' +
-                '<i data-lucide="user-check" class="w-4 h-4 text-sky-400 shrink-0"></i>' +
+                '<i data-lucide="chevron-up" class="w-4 h-4 text-sky-400 shrink-0"></i>' +
               '</button>' +
               '<div id="userDropdownPopup" class="hidden absolute bottom-full left-0 w-full mb-2 bg-slate-900 border border-slate-800 shadow-xl z-50 py-2">' +
-                '<p class="px-3 py-1.5 text-[10px] font-bold text-slate-400 tracking-wider uppercase border-b border-slate-800">Simular Usuario (Roles)</p>' +
-                usersMenu +
+                '<button onclick="byId(\'userDropdownPopup\').classList.add(\'hidden\'); setActiveTab(\'settings\')" class="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-left text-slate-300 hover:bg-slate-800/50"><i data-lucide="user-cog" class="w-4 h-4"></i>Mi Cuenta</button>' +
+                '<button onclick="handleLogout()" class="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-left text-rose-400 hover:bg-slate-800/50"><i data-lucide="log-out" class="w-4 h-4"></i>Cerrar sesión</button>' +
               '</div>' +
             '</div>' +
           '</div>' +
@@ -326,15 +428,6 @@
     }
 
     function mobileSidebarHtml() {
-      var d = APP.data;
-      var usersList = d.users.map(function (u) {
-        var sel = d.activeUserId === u.id;
-        return '' +
-          '<button onclick="handleSelectUser(\'' + u.id + '\'); byId(\'mobileSidebarOverlay\').classList.add(\'hidden\')" class="flex items-center gap-2 p-2 rounded-xl text-xs text-left ' +
-            (sel ? 'bg-slate-800 border border-slate-700 font-semibold text-white' : 'hover:bg-slate-800/50 text-slate-400') + '">' +
-            '<img src="' + esc(u.avatar) + '" class="w-5 h-5 rounded-full object-cover"><div><p class="leading-none font-bold">' + esc(u.name) + '</p><p class="text-[9px]">' + esc(u.role) + '</p></div>' +
-          '</button>';
-      }).join('');
       return '' +
         '<div id="mobileSidebarOverlay" class="hidden fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 md:hidden flex">' +
           '<div class="w-64 bg-slate-900 h-full p-4 flex flex-col justify-between border-r border-slate-800">' +
@@ -345,9 +438,9 @@
               '</div>' +
               '<nav class="space-y-1">' + navButtonsHtml('') + '</nav>' +
             '</div>' +
-            '<div class="pt-4 border-t border-slate-800">' +
-              '<p class="text-[10px] font-bold text-slate-500 uppercase mb-2">Simular Rol</p>' +
-              '<div class="grid grid-cols-1 gap-1">' + usersList + '</div>' +
+            '<div class="pt-4 border-t border-slate-800 space-y-1">' +
+              '<button onclick="byId(\'mobileSidebarOverlay\').classList.add(\'hidden\'); setActiveTab(\'settings\')" class="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-xs text-left text-slate-300 hover:bg-slate-800/50"><i data-lucide="user-cog" class="w-4 h-4"></i>Mi Cuenta</button>' +
+              '<button onclick="handleLogout()" class="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-xs text-left text-rose-400 hover:bg-slate-800/50"><i data-lucide="log-out" class="w-4 h-4"></i>Cerrar sesión</button>' +
             '</div>' +
           '</div>' +
           '<div class="flex-1" onclick="byId(\'mobileSidebarOverlay\').classList.add(\'hidden\')"></div>' +
@@ -356,11 +449,11 @@
 
     function mobileBottomNavHtml() {
       return '' +
-        '<nav class="md:hidden fixed bottom-0 left-0 right-0 bg-slate-900/90 backdrop-blur border-t border-slate-800 h-16 flex items-center justify-around px-4 z-40 shadow-lg">' +
+        '<nav class="md:hidden fixed bottom-0 left-0 right-0 bg-slate-900/90 backdrop-blur border-t border-slate-800 h-16 flex items-center justify-around px-2 z-40 shadow-lg overflow-x-auto">' +
           NAV_ITEMS.map(function (item) {
             var isActive = APP.activeTab === item.id;
             return '' +
-              '<button onclick="setActiveTab(\'' + item.id + '\')" class="flex flex-col items-center gap-1 transition-all ' + (isActive ? 'text-sky-400 font-bold' : 'text-slate-400') + '">' +
+              '<button onclick="setActiveTab(\'' + item.id + '\')" class="flex flex-col items-center gap-1 transition-all shrink-0 px-1.5 ' + (isActive ? 'text-sky-400 font-bold' : 'text-slate-400') + '">' +
                 '<i data-lucide="' + item.icon + '" class="w-5 h-5"></i><span class="text-[9px] uppercase tracking-wider font-semibold">' + item.id.substring(0, 5) + '</span>' +
               '</button>';
           }).join('') +
@@ -371,12 +464,8 @@
       return '' +
         '<footer class="hidden md:flex justify-between items-center py-5 px-8 border-t border-slate-800/80 text-xs text-slate-500 font-medium bg-slate-950/40">' +
           '<div class="flex items-center gap-2"><span>© 2026 PrintTech Solutions Global</span></div>' +
-          '<div class="flex items-center gap-3 font-mono text-[11px]"><span class="flex items-center gap-1.5 text-emerald-400"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>Sistema Operativo</span><span>|</span><span class="text-slate-400">Build: 4.2.1-gas</span></div>' +
+          '<div class="flex items-center gap-3 font-mono text-[11px]"><span class="flex items-center gap-1.5 text-emerald-400"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>Sistema Operativo</span><span>|</span><span class="text-slate-400">Build: 5.0.0-gas</span></div>' +
         '</footer>';
-    }
-
-    function handleSelectUser(userId) {
-      gsRun('selectUser', userId).then(function () { loadData(false); });
     }
 
     // -----------------------------------------------------------------------
@@ -389,11 +478,16 @@
       else if (APP.activeTab === 'cases') main.innerHTML = casesHtml();
       else if (APP.activeTab === 'library') main.innerHTML = libraryHtml();
       else if (APP.activeTab === 'training') main.innerHTML = trainingHtml();
+      else if (APP.activeTab === 'content') main.innerHTML = contentHtml();
       else if (APP.activeTab === 'settings') main.innerHTML = settingsHtml();
       refreshIcons();
 
       if (APP.activeTab === 'cases') renderCasesResults();
       if (APP.activeTab === 'library') renderLibraryResults();
+      if (APP.activeTab === 'content') {
+        renderManualsAdminList();
+        renderVideosAdminList();
+      }
       if (APP.activeTab === 'dashboard') {
         setTimeout(function () {
           var bar = byId('trainingProgressBar');
@@ -412,7 +506,7 @@
       var pendingCases = d.cases.filter(function (c) { return c.status === 'Esperando Pieza'; }).length;
       var solvedCases = d.cases.filter(function (c) { return c.status === 'Resuelto'; }).length;
 
-      var manualsHtml = d.manuals.map(function (m) {
+      var manualsHtml = d.manuals.slice(0, 6).map(function (m) {
         var diffClass = m.difficulty === 'HARD' ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20' :
           m.difficulty === 'MEDIUM' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
         var diffLabel = m.difficulty === 'HARD' ? 'NIVEL PRO' : m.difficulty === 'MEDIUM' ? 'AVANZADO' : 'BÁSICO';
@@ -423,7 +517,7 @@
               '<p class="font-semibold text-sm text-white group-hover:text-sky-400 transition-colors line-clamp-1">' + esc(m.title) + '</p>' +
               '<p class="text-xs text-slate-400 line-clamp-1">' + esc(m.description) + '</p>' +
               '<div class="flex items-center gap-4 mt-1">' +
-                '<span class="flex items-center gap-1 text-[10px] text-slate-500 font-medium"><i data-lucide="timer" class="w-3 h-3"></i> 12 min</span>' +
+                '<span class="text-[9px] px-1.5 py-0.5 rounded font-bold uppercase ' + (m.resourceType === 'Controlador' ? 'bg-amber-500/10 text-amber-400' : 'bg-sky-500/10 text-sky-400') + '">' + esc(m.resourceType) + '</span>' +
                 '<span class="flex items-center gap-1 text-[10px] text-slate-500 font-medium"><i data-lucide="eye" class="w-3 h-3"></i> ' + m.views + ' vistas</span>' +
                 '<span class="text-[9px] px-1.5 py-0.5 rounded font-bold uppercase ' + diffClass + '">' + diffLabel + '</span>' +
               '</div>' +
@@ -435,7 +529,7 @@
         '<div class="space-y-8 max-w-7xl mx-auto">' +
           '<section class="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 md:p-8 shadow-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-6 relative overflow-hidden">' +
             '<div class="space-y-2 relative z-10">' +
-              '<h1 class="font-bold text-3xl md:text-4xl text-white tracking-tight">Bienvenido al Portal de Servicio</h1>' +
+              '<h1 class="font-bold text-3xl md:text-4xl text-white tracking-tight">Bienvenido, ' + esc(getActiveUser().name) + '</h1>' +
               '<p class="text-slate-300 text-base md:text-lg max-w-2xl leading-relaxed">Gestione sus tareas técnicas, supervise el estado de los equipos y continúe su formación profesional con las herramientas avanzadas de PrintTech.</p>' +
             '</div>' +
             '<div class="shrink-0 flex items-center gap-2 bg-slate-800 border border-slate-700 rounded-full px-4 py-2 text-xs font-semibold text-sky-400 z-10"><i data-lucide="database-zap" class="w-4 h-4"></i><span>Google Sheets Conectado</span></div>' +
@@ -456,6 +550,12 @@
                 '<div class="z-10"><p class="font-bold text-base text-white">Certificación en curso</p><p class="text-xs text-slate-400">Mantenimiento Preventivo L-Format</p></div>' +
                 '<div class="absolute bottom-0 left-0 h-1 bg-sky-500 w-2/3"></div>' +
               '</button>' +
+              (getActiveUser().role === 'Admin Tech' ? (
+                '<button onclick="setActiveTab(\'content\')" class="group bg-slate-900/40 border border-slate-800 rounded-2xl p-4 flex items-center gap-4 hover:border-sky-500 hover:shadow-md transition-all text-left w-full cursor-pointer">' +
+                  '<div class="w-12 h-12 rounded-xl bg-slate-800 text-sky-400 flex items-center justify-center shrink-0 group-hover:bg-sky-500 group-hover:text-white transition-colors"><i data-lucide="upload" class="w-6 h-6"></i></div>' +
+                  '<div><p class="font-bold text-base text-white">Subir Contenido</p><p class="text-xs text-slate-400">Instructivos, controladores y videos</p></div>' +
+                '</button>'
+              ) : '') +
             '</div>' +
             '<div class="col-span-12 lg:col-span-8 bg-slate-900/40 border border-slate-800 p-6 rounded-3xl flex flex-col justify-between shadow-sm">' +
               '<div class="flex justify-between items-start mb-6">' +
@@ -469,7 +569,7 @@
               '</div>' +
             '</div>' +
             '<div class="col-span-12 lg:col-span-7 bg-slate-900/40 border border-slate-800 rounded-3xl flex flex-col overflow-hidden shadow-sm">' +
-              '<div class="p-6 border-b border-slate-800 flex justify-between items-center"><h3 class="font-bold text-lg text-white">Instructivos Populares</h3><i data-lucide="book-open" class="w-5 h-5 text-slate-400"></i></div>' +
+              '<div class="p-6 border-b border-slate-800 flex justify-between items-center"><h3 class="font-bold text-lg text-white">Instructivos y Controladores Populares</h3><i data-lucide="book-open" class="w-5 h-5 text-slate-400"></i></div>' +
               '<div class="divide-y divide-slate-800 overflow-y-auto max-h-[360px] custom-scrollbar">' + manualsHtml + '</div>' +
             '</div>' +
             '<div class="col-span-12 lg:col-span-5 flex flex-col gap-6">' +
@@ -501,8 +601,11 @@
     }
 
     function handleDownloadManualFromDashboard(manualId) {
-      gsRun('downloadManual', manualId).then(function () {
+      gsRun('downloadManual', APP.session.token, manualId).then(function (res) {
         APP.activeTab = 'library';
+        if (res.success && res.manual.downloadUrl && res.manual.downloadUrl !== '#') {
+          window.open(res.manual.downloadUrl, '_blank');
+        }
         loadData(false);
         renderAll();
       });
@@ -680,7 +783,7 @@
         return;
       }
       if (confirm('¿Está seguro de que desea eliminar permanentemente el caso ' + id + '? Esta acción quitará la fila de la hoja de cálculo de Google Sheets de forma instantánea.')) {
-        gsRun('deleteCase', id).then(function (res) {
+        gsRun('deleteCase', APP.session.token, id).then(function (res) {
           if (!res.success) alert(res.error || 'No se pudo eliminar el caso.');
           loadData(false);
         });
@@ -724,7 +827,7 @@
         id: id, client: client, model: model, status: status, priority: priority, description: description,
         reporter: (APP.editingCase && !APP.editingCase.isNew) ? APP.editingCase.reporter : activeUser.name
       };
-      gsRun('saveCase', payload).then(function (res) {
+      gsRun('saveCase', APP.session.token, payload).then(function (res) {
         APP.isSubmitting = false;
         if (res.success) {
           APP.editingCase = null;
@@ -820,7 +923,7 @@
     }
 
     // -----------------------------------------------------------------------
-    // Instruction Library
+    // Instruction Library (Manuales / Controladores)
     // -----------------------------------------------------------------------
     function libraryHtml() {
       var catButtons = LIBRARY_CATEGORIES.map(function (cat) {
@@ -829,9 +932,17 @@
           (sel ? 'bg-sky-500 text-white font-bold border border-sky-500' : 'border border-slate-800 text-slate-300 hover:bg-slate-800/50 hover:text-white') + '">' + esc(cat) + '</button>';
       }).join('');
 
+      var resourceTabs = ['Manual', 'Controlador'].map(function (rt) {
+        var sel = APP.library.resourceType === rt;
+        var label = rt === 'Manual' ? 'Manuales / Instructivos' : 'Controladores (Drivers)';
+        return '<button onclick="setLibraryResourceType(\'' + rt + '\')" class="flex-1 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ' +
+          (sel ? 'bg-sky-500 text-white' : 'border border-slate-800 text-slate-300 hover:bg-slate-800/50') + '">' + label + '</button>';
+      }).join('');
+
       return '' +
         '<div class="space-y-6 max-w-7xl mx-auto">' +
-          '<div class="flex flex-col gap-1 bg-slate-900/40 p-6 border border-slate-800 rounded-3xl shadow-sm"><h1 class="font-bold text-2xl text-white">Biblioteca de Instructivos</h1><p class="text-slate-400 text-sm">Accede a la base de datos técnica más completa para profesionales de impresión.</p></div>' +
+          '<div class="flex flex-col gap-1 bg-slate-900/40 p-6 border border-slate-800 rounded-3xl shadow-sm"><h1 class="font-bold text-2xl text-white">Biblioteca de Instructivos y Controladores</h1><p class="text-slate-400 text-sm">Accede y descarga la documentación técnica y los drivers de PrintTech.</p></div>' +
+          '<div class="flex gap-2">' + resourceTabs + '</div>' +
           '<div class="flex flex-col lg:flex-row gap-6">' +
             '<div class="flex-grow space-y-6">' +
               '<div class="bg-slate-900/40 p-4 rounded-2xl border border-slate-800 flex flex-col sm:flex-row gap-4 items-center justify-between shadow-sm">' +
@@ -851,8 +962,8 @@
               '</div>' +
               '<div class="bg-slate-800/80 border border-slate-700 rounded-3xl p-5 flex flex-col gap-3 relative overflow-hidden shadow-md">' +
                 '<span class="text-[10px] font-bold tracking-widest text-sky-400 uppercase">Base de Datos</span>' +
-                '<div class="flex items-baseline gap-2"><span class="text-4xl font-bold font-mono text-white">1,248</span><span class="text-xs text-slate-400 font-semibold">Instructivos</span></div>' +
-                '<p class="text-xs text-slate-400 leading-relaxed">Manuales técnicos certificados por fábrica, planos mecánicos interactivos y diagramas de circuitos para soporte nivel 4.</p>' +
+                '<div class="flex items-baseline gap-2"><span class="text-4xl font-bold font-mono text-white">' + APP.data.manuals.length + '</span><span class="text-xs text-slate-400 font-semibold">Recursos cargados</span></div>' +
+                '<p class="text-xs text-slate-400 leading-relaxed">Manuales técnicos, controladores certificados y esquemas para soporte de nivel 4.</p>' +
               '</div>' +
             '</aside>' +
           '</div>' +
@@ -861,6 +972,11 @@
 
     function setLibraryCategory(cat) {
       APP.library.selectedType = cat;
+      renderMainContent();
+    }
+
+    function setLibraryResourceType(rt) {
+      APP.library.resourceType = rt;
       renderMainContent();
     }
 
@@ -873,17 +989,19 @@
       if (!APP.data) return;
       var q = (APP.library.search || '').toLowerCase();
       var type = APP.library.selectedType;
+      var resourceType = APP.library.resourceType;
       var filtered = APP.data.manuals.filter(function (m) {
+        var matchesResource = m.resourceType === resourceType;
         var matchesType = type === 'Todos' || m.type === type;
         var matchesSearch = m.title.toLowerCase().indexOf(q) !== -1 || m.description.toLowerCase().indexOf(q) !== -1;
-        return matchesType && matchesSearch;
+        return matchesResource && matchesType && matchesSearch;
       });
 
       var grid = byId('libraryGrid');
       if (!grid) return;
 
       if (filtered.length === 0) {
-        grid.innerHTML = '<div class="col-span-full py-12 text-center text-slate-400 font-medium bg-slate-900/40 rounded-3xl border border-slate-800">No hay manuales de soporte disponibles que coincidan con la búsqueda técnica.</div>';
+        grid.innerHTML = '<div class="col-span-full py-12 text-center text-slate-400 font-medium bg-slate-900/40 rounded-3xl border border-slate-800">No hay recursos disponibles que coincidan con la búsqueda técnica.</div>';
         refreshIcons();
         return;
       }
@@ -902,7 +1020,7 @@
               '<p class="text-xs text-slate-400 leading-relaxed line-clamp-2">' + esc(m.description) + '</p></div>' +
               '<div class="pt-4 border-t border-slate-800 flex items-center justify-between mt-auto">' +
                 '<div class="flex items-center gap-3 text-[10px] text-slate-400 font-semibold"><span class="flex items-center gap-1"><i data-lucide="calendar" class="w-3.5 h-3.5 text-sky-400"></i>' + esc(m.date) + '</span><span class="flex items-center gap-1"><i data-lucide="eye" class="w-3.5 h-3.5 text-sky-400"></i>' + m.views + ' Vistas</span></div>' +
-                '<button onclick="handleDownloadManual(\'' + esc(m.id) + '\')" class="flex items-center gap-1.5 px-3.5 py-2 bg-sky-500 text-white rounded-xl font-bold text-xs hover:bg-sky-600 hover:shadow-md transition-colors cursor-pointer"><i data-lucide="download" class="w-3.5 h-3.5"></i><span>Descargar PDF</span></button>' +
+                '<button onclick="handleDownloadManual(\'' + esc(m.id) + '\')" class="flex items-center gap-1.5 px-3.5 py-2 bg-sky-500 text-white rounded-xl font-bold text-xs hover:bg-sky-600 hover:shadow-md transition-colors cursor-pointer"><i data-lucide="download" class="w-3.5 h-3.5"></i><span>Descargar</span></button>' +
               '</div>' +
             '</div>' +
           '</div>';
@@ -911,10 +1029,13 @@
     }
 
     function handleDownloadManual(manualId) {
-      gsRun('downloadManual', manualId).then(function (res) {
+      gsRun('downloadManual', APP.session.token, manualId).then(function (res) {
         if (res.success) {
           APP.library.downloadingManual = res.manual;
           renderToast();
+          if (res.manual.downloadUrl && res.manual.downloadUrl !== '#') {
+            window.open(res.manual.downloadUrl, '_blank');
+          }
           setTimeout(function () { APP.library.downloadingManual = null; renderToast(); }, 2500);
         }
         loadData(false);
@@ -929,13 +1050,13 @@
       root.innerHTML = '' +
         '<div class="fixed bottom-6 right-6 bg-slate-900 border border-slate-800 shadow-2xl p-4 rounded-2xl z-50 flex items-center gap-3 animate-fade-in max-w-sm">' +
           '<div class="w-8 h-8 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0"><i data-lucide="check-circle" class="w-5 h-5"></i></div>' +
-          '<div><p class="text-xs font-bold text-white">Descargando Manual</p><p class="text-[10px] text-slate-400 truncate">' + esc(m.title) + '</p><p class="text-[9px] text-sky-400 font-semibold mt-0.5">Sincronizado & guardado log de descarga en Sheets.</p></div>' +
+          '<div><p class="text-xs font-bold text-white">Descargando</p><p class="text-[10px] text-slate-400 truncate">' + esc(m.title) + '</p><p class="text-[9px] text-sky-400 font-semibold mt-0.5">Registrado en el historial de descargas.</p></div>' +
         '</div>';
       refreshIcons();
     }
 
     // -----------------------------------------------------------------------
-    // Training
+    // Training (Cursos + Videos de Capacitación)
     // -----------------------------------------------------------------------
     function trainingHtml() {
       var d = APP.data;
@@ -956,6 +1077,25 @@
             '<div class="p-5 pt-0"><button onclick="openCourseModal(\'' + esc(course.id) + '\')" class="w-full py-2.5 text-xs font-bold rounded-xl transition-all cursor-pointer ' + btnClass + '">' + btnLabel + '</button></div>' +
           '</div>';
       }).join('');
+
+      var videos = d.videos || [];
+      var videosGrid = videos.length === 0
+        ? '<div class="col-span-full py-10 text-center text-slate-400 font-medium bg-slate-900/40 rounded-3xl border border-slate-800 border-dashed">Aún no hay videos de capacitación cargados.' +
+          (getActiveUser().role === 'Admin Tech' ? ' <button onclick="setActiveTab(\'content\')" class="text-sky-400 font-bold hover:underline">Sube el primero desde Contenido</button>.' : '') + '</div>'
+        : videos.map(function (v) {
+          var thumb = v.thumbnail || 'https://images.unsplash.com/photo-1516035069371-29a1b244cc32?auto=format&fit=crop&w=400&q=80';
+          return '' +
+            '<div class="group bg-slate-900/40 border border-slate-800 rounded-3xl overflow-hidden hover:shadow-lg transition-all flex flex-col">' +
+              '<div onclick="openVideoPlayer(\'' + esc(v.id) + '\')" class="h-40 relative bg-slate-950 border-b border-slate-800 cursor-pointer">' +
+                '<img src="' + esc(thumb) + '" class="w-full h-full object-cover saturate-[0.8] group-hover:scale-105 transition-transform duration-500">' +
+                '<div class="absolute inset-0 flex items-center justify-center bg-slate-950/30 group-hover:bg-slate-950/50 transition-colors"><div class="w-12 h-12 rounded-full bg-sky-500/90 flex items-center justify-center shadow-lg"><i data-lucide="play" class="w-5 h-5 text-white"></i></div></div>' +
+              '</div>' +
+              '<div class="p-4 space-y-1.5 flex-grow flex flex-col justify-between">' +
+                '<div><h3 class="font-bold text-sm text-white line-clamp-1">' + esc(v.title) + '</h3><p class="text-xs text-slate-400 leading-relaxed line-clamp-2 mt-1">' + esc(v.description) + '</p></div>' +
+                '<button onclick="openVideoPlayer(\'' + esc(v.id) + '\')" class="mt-3 w-full py-2 bg-sky-500 hover:bg-sky-600 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"><i data-lucide="play-circle" class="w-4 h-4"></i>Reproducir</button>' +
+              '</div>' +
+            '</div>';
+        }).join('');
 
       return '' +
         '<div class="space-y-6 max-w-7xl mx-auto">' +
@@ -1000,6 +1140,12 @@
               '</div>' +
             '</div>' +
           '</div>' +
+          '<div class="space-y-4">' +
+            '<div class="flex items-center justify-between"><h2 class="font-bold text-lg text-white flex items-center gap-2"><i data-lucide="video" class="w-5 h-5 text-sky-400"></i> Videos de Capacitación</h2>' +
+              (getActiveUser().role === 'Admin Tech' ? '<button onclick="setActiveTab(\'content\')" class="text-xs text-sky-400 font-bold hover:underline flex items-center gap-1"><i data-lucide="upload" class="w-3.5 h-3.5"></i>Subir video</button>' : '') +
+            '</div>' +
+            '<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">' + videosGrid + '</div>' +
+          '</div>' +
         '</div>';
     }
 
@@ -1025,7 +1171,7 @@
     }
 
     function onCourseProgressChange(courseId, v) {
-      gsRun('updateCourseProgress', courseId, Number(v)).then(function () { loadData(false); });
+      gsRun('updateCourseProgress', APP.session.token, courseId, Number(v)).then(function () { loadData(false); });
     }
 
     function courseModalHtml() {
@@ -1051,22 +1197,473 @@
         '</div>';
     }
 
+    function openVideoPlayer(id) {
+      APP.training.playingVideoId = id;
+      renderModals();
+    }
+
+    function closeVideoPlayer() {
+      APP.training.playingVideoId = null;
+      renderModals();
+    }
+
+    function videoPlayerModalHtml() {
+      var v = (APP.data.videos || []).filter(function (x) { return x.id === APP.training.playingVideoId; })[0];
+      if (!v) return '';
+      var playerHtml;
+      if (v.driveFileId) {
+        playerHtml = '<iframe src="https://drive.google.com/file/d/' + esc(v.driveFileId) + '/preview" class="w-full h-full" allow="autoplay" allowfullscreen></iframe>';
+      } else if (/\.(mp4|webm|ogg)(\?|$)/i.test(v.externalUrl || '')) {
+        playerHtml = '<video src="' + esc(v.externalUrl) + '" controls autoplay class="w-full h-full bg-black"></video>';
+      } else {
+        var yt = extractYouTubeId_(v.externalUrl);
+        if (yt) {
+          playerHtml = '<iframe src="https://www.youtube.com/embed/' + yt + '?autoplay=1" class="w-full h-full" allow="autoplay; encrypted-media" allowfullscreen></iframe>';
+        } else {
+          playerHtml = '<iframe src="' + esc(v.externalUrl) + '" class="w-full h-full" allowfullscreen></iframe>';
+        }
+      }
+      return '' +
+        '<div class="fixed inset-0 bg-slate-950/90 backdrop-blur-sm z-50 flex items-center justify-center p-4">' +
+          '<div class="bg-slate-900 w-full max-w-3xl rounded-3xl border border-slate-800 shadow-2xl overflow-hidden animate-fade-in">' +
+            '<div class="bg-slate-950 border-b border-slate-800 p-4 flex justify-between items-center gap-3">' +
+              '<div class="min-w-0"><h3 class="font-bold text-sm text-white truncate">' + esc(v.title) + '</h3><p class="text-[11px] text-slate-400 truncate">' + esc(v.description) + '</p></div>' +
+              '<button onclick="closeVideoPlayer()" class="p-1.5 hover:bg-white/10 rounded-xl text-white cursor-pointer shrink-0"><i data-lucide="x" class="w-5 h-5"></i></button>' +
+            '</div>' +
+            '<div class="aspect-video bg-black">' + playerHtml + '</div>' +
+          '</div>' +
+        '</div>';
+    }
+
+    // -----------------------------------------------------------------------
+    // Contenido: gestión de instructivos, controladores y videos (Admin Tech)
+    // -----------------------------------------------------------------------
+    function contentHtml() {
+      var isAdmin = getActiveUser().role === 'Admin Tech';
+      if (!isAdmin) {
+        return '' +
+          '<div class="max-w-3xl mx-auto space-y-6">' +
+            '<div class="flex flex-col gap-1 bg-slate-900/40 p-6 border border-slate-800 rounded-3xl shadow-sm"><h1 class="font-bold text-2xl text-white">Contenido</h1><p class="text-slate-400 text-sm">Gestión de instructivos, controladores y videos de capacitación.</p></div>' +
+            '<div class="bg-rose-500/10 border border-rose-500/20 rounded-2xl p-4 text-rose-400 text-xs font-semibold flex items-center gap-3"><i data-lucide="shield-alert" class="w-5 h-5 shrink-0"></i><span>Acceso restringido: solo el rol Admin Tech puede administrar el contenido del portal.</span></div>' +
+          '</div>';
+      }
+      return '' +
+        '<div class="max-w-6xl mx-auto space-y-6">' +
+          '<div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-slate-900/40 p-6 border border-slate-800 rounded-3xl shadow-sm">' +
+            '<div><h1 class="font-bold text-2xl text-white">Contenido</h1><p class="text-slate-400 text-sm mt-1">Sube y administra instructivos, controladores y videos de capacitación.</p></div>' +
+          '</div>' +
+          '<div class="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 shadow-sm space-y-4">' +
+            '<div class="flex justify-between items-center flex-wrap gap-2"><h3 class="font-bold text-lg text-white flex items-center gap-2"><i data-lucide="book-open" class="w-5 h-5 text-sky-400"></i>Instructivos y Controladores</h3>' +
+            '<button onclick="openManualForm()" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer"><i data-lucide="plus" class="w-4 h-4"></i>Nuevo</button></div>' +
+            '<div id="manualsAdminList" class="space-y-2"></div>' +
+          '</div>' +
+          '<div class="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 shadow-sm space-y-4">' +
+            '<div class="flex justify-between items-center flex-wrap gap-2"><h3 class="font-bold text-lg text-white flex items-center gap-2"><i data-lucide="video" class="w-5 h-5 text-sky-400"></i>Videos de Capacitación</h3>' +
+            '<button onclick="openVideoForm()" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer"><i data-lucide="plus" class="w-4 h-4"></i>Nuevo</button></div>' +
+            '<div id="videosAdminList" class="space-y-2"></div>' +
+          '</div>' +
+        '</div>';
+    }
+
+    function renderManualsAdminList() {
+      var el = byId('manualsAdminList');
+      if (!el || !APP.data) return;
+      var rows = APP.data.manuals.map(function (m) {
+        return '' +
+          '<div class="flex items-center justify-between gap-3 bg-slate-950/40 border border-slate-800 rounded-xl px-4 py-3">' +
+            '<div class="min-w-0"><div class="flex items-center gap-2"><span class="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded ' + (m.resourceType === 'Controlador' ? 'bg-amber-500/10 text-amber-400' : 'bg-sky-500/10 text-sky-400') + '">' + esc(m.resourceType) + '</span><p class="font-semibold text-sm text-white truncate">' + esc(m.title) + '</p></div>' +
+            '<p class="text-[11px] text-slate-400 truncate">' + esc(m.type) + ' · ' + esc(m.date) + ' · ' + m.views + ' vistas</p></div>' +
+            '<div class="flex items-center gap-1.5 shrink-0">' +
+              (m.downloadUrl && m.downloadUrl !== '#' ? '<a href="' + esc(m.downloadUrl) + '" target="_blank" rel="noopener" class="p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white rounded-lg" title="Abrir archivo"><i data-lucide="external-link" class="w-4 h-4"></i></a>' : '') +
+              '<button onclick="openManualForm(\'' + esc(m.id) + '\')" class="p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white rounded-lg cursor-pointer" title="Editar"><i data-lucide="edit-3" class="w-4 h-4"></i></button>' +
+              '<button onclick="confirmDeleteManual(\'' + esc(m.id) + '\')" class="p-1.5 text-rose-400 hover:bg-rose-500/10 rounded-lg cursor-pointer" title="Eliminar"><i data-lucide="trash-2" class="w-4 h-4"></i></button>' +
+            '</div>' +
+          '</div>';
+      }).join('') || '<p class="text-xs text-slate-500 text-center py-6">Aún no hay instructivos ni controladores.</p>';
+      el.innerHTML = rows;
+      refreshIcons();
+    }
+
+    function renderVideosAdminList() {
+      var el = byId('videosAdminList');
+      if (!el || !APP.data) return;
+      var rows = (APP.data.videos || []).map(function (v) {
+        return '' +
+          '<div class="flex items-center justify-between gap-3 bg-slate-950/40 border border-slate-800 rounded-xl px-4 py-3">' +
+            '<div class="min-w-0"><p class="font-semibold text-sm text-white truncate">' + esc(v.title) + '</p>' +
+            '<p class="text-[11px] text-slate-400 truncate">' + (v.driveFileId ? 'Video subido a Drive' : 'Enlace externo') + ' · ' + esc(v.date) + '</p></div>' +
+            '<div class="flex items-center gap-1.5 shrink-0">' +
+              '<button onclick="openVideoPlayer(\'' + esc(v.id) + '\')" class="p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white rounded-lg cursor-pointer" title="Reproducir"><i data-lucide="play" class="w-4 h-4"></i></button>' +
+              '<button onclick="openVideoForm(\'' + esc(v.id) + '\')" class="p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white rounded-lg cursor-pointer" title="Editar"><i data-lucide="edit-3" class="w-4 h-4"></i></button>' +
+              '<button onclick="confirmDeleteVideo(\'' + esc(v.id) + '\')" class="p-1.5 text-rose-400 hover:bg-rose-500/10 rounded-lg cursor-pointer" title="Eliminar"><i data-lucide="trash-2" class="w-4 h-4"></i></button>' +
+            '</div>' +
+          '</div>';
+      }).join('') || '<p class="text-xs text-slate-500 text-center py-6">Aún no hay videos de capacitación.</p>';
+      el.innerHTML = rows;
+      refreshIcons();
+    }
+
+    function openManualForm(id) {
+      var existing = id ? APP.data.manuals.filter(function (m) { return m.id === id; })[0] : null;
+      APP.content.editingManual = existing ? Object.assign({}, existing) : { id: null, resourceType: 'Manual', difficulty: 'MEDIUM' };
+      APP.content.manualFormError = '';
+      APP.content.manualUploadMode = 'file';
+      APP.content.pendingManualFile = null;
+      APP.content.isSubmitting = false;
+      renderModals();
+    }
+
+    function closeManualForm() {
+      APP.content.editingManual = null;
+      renderModals();
+    }
+
+    function setManualUploadMode(mode) {
+      APP.content.manualUploadMode = mode;
+      var fileSection = byId('manualFileSection');
+      var linkSection = byId('manualLinkSection');
+      if (fileSection) fileSection.classList.toggle('hidden', mode !== 'file');
+      if (linkSection) linkSection.classList.toggle('hidden', mode !== 'link');
+    }
+
+    function onManualFileSelected(ev) {
+      var file = ev.target.files[0];
+      if (!file) { APP.content.pendingManualFile = null; return; }
+      readFileAsBase64_(file, function (info) {
+        APP.content.pendingManualFile = info;
+        var label = byId('manualFileSelectedLabel');
+        if (label) label.textContent = file.name + ' (' + Math.round(file.size / 1024) + ' KB)';
+      });
+    }
+
+    function manualFormModalHtml() {
+      var m = APP.content.editingManual;
+      var isNew = !m.id;
+      var mode = APP.content.manualUploadMode || 'file';
+      return '' +
+        '<div class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">' +
+          '<div class="bg-slate-900 w-full max-w-lg rounded-3xl border border-slate-800 shadow-2xl overflow-hidden animate-fade-in max-h-[90vh] overflow-y-auto custom-scrollbar">' +
+            '<div class="bg-slate-950 border-b border-slate-800 p-5 text-white flex justify-between items-center sticky top-0 z-10">' +
+              '<h3 class="font-bold text-lg text-white">' + (isNew ? 'Nuevo Instructivo / Controlador' : 'Editar: ' + esc(m.title)) + '</h3>' +
+              '<button onclick="closeManualForm()" class="p-1.5 hover:bg-white/10 rounded-xl text-white cursor-pointer"><i data-lucide="x" class="w-5 h-5"></i></button>' +
+            '</div>' +
+            '<form onsubmit="submitManualForm(event)" class="p-6 space-y-4">' +
+              (APP.content.manualFormError ? '<div class="bg-rose-500/10 border border-rose-500/20 text-rose-400 px-4 py-2.5 rounded-xl text-xs font-semibold">' + esc(APP.content.manualFormError) + '</div>' : '') +
+              '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Tipo de recurso</label>' +
+                '<select id="manualFormResourceType" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-sm">' +
+                  '<option value="Manual" ' + (m.resourceType !== 'Controlador' ? 'selected' : '') + '>Manual / Instructivo</option>' +
+                  '<option value="Controlador" ' + (m.resourceType === 'Controlador' ? 'selected' : '') + '>Controlador (Driver)</option>' +
+                '</select></div>' +
+              '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Título</label>' +
+                '<input id="manualFormTitle" type="text" value="' + esc(m.title || '') + '" class="w-full bg-slate-800 border border-slate-700 rounded-xl py-2 px-3 text-sm text-white"></div>' +
+              '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Descripción</label>' +
+                '<textarea id="manualFormDescription" rows="2" class="w-full bg-slate-800 border border-slate-700 rounded-xl py-2 px-3 text-sm text-white">' + esc(m.description || '') + '</textarea></div>' +
+              '<div class="grid grid-cols-2 gap-4">' +
+                '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Categoría</label>' +
+                  '<input id="manualFormType" type="text" value="' + esc(m.type || 'General') + '" placeholder="Láser, Gran Formato..." class="w-full bg-slate-800 border border-slate-700 rounded-xl py-2 px-3 text-sm text-white"></div>' +
+                '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Dificultad</label>' +
+                  '<select id="manualFormDifficulty" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-sm">' +
+                    '<option value="EASY" ' + (m.difficulty === 'EASY' ? 'selected' : '') + '>Básico</option>' +
+                    '<option value="MEDIUM" ' + (!m.difficulty || m.difficulty === 'MEDIUM' ? 'selected' : '') + '>Avanzado</option>' +
+                    '<option value="HARD" ' + (m.difficulty === 'HARD' ? 'selected' : '') + '>Nivel Pro</option>' +
+                  '</select></div>' +
+              '</div>' +
+              '<div class="space-y-2">' +
+                '<label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Archivo</label>' +
+                '<div class="flex gap-2">' +
+                  '<button type="button" onclick="setManualUploadMode(\'file\')" class="flex-1 py-1.5 rounded-xl text-xs font-bold ' + (mode === 'file' ? 'bg-sky-500 text-white' : 'border border-slate-700 text-slate-300') + '">Subir archivo</button>' +
+                  '<button type="button" onclick="setManualUploadMode(\'link\')" class="flex-1 py-1.5 rounded-xl text-xs font-bold ' + (mode === 'link' ? 'bg-sky-500 text-white' : 'border border-slate-700 text-slate-300') + '">Enlace / Drive</button>' +
+                '</div>' +
+                '<div id="manualFileSection" class="' + (mode === 'file' ? '' : 'hidden') + ' space-y-1">' +
+                  '<input id="manualFileInput" type="file" onchange="onManualFileSelected(event)" class="w-full text-xs text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-sky-500 file:text-white file:text-xs file:font-bold">' +
+                  '<p id="manualFileSelectedLabel" class="text-[10px] text-slate-500">' + (m.downloadUrl && m.downloadUrl !== '#' ? 'Archivo actual conservado si no seleccionas uno nuevo.' : 'Ningún archivo seleccionado (máx. ~20 MB).') + '</p>' +
+                '</div>' +
+                '<div id="manualLinkSection" class="' + (mode === 'link' ? '' : 'hidden') + ' space-y-1">' +
+                  '<input id="manualLinkInput" type="text" value="' + (mode === 'link' && m.downloadUrl && m.downloadUrl !== '#' ? esc(m.downloadUrl) : '') + '" placeholder="https://drive.google.com/file/d/.../view" class="w-full bg-slate-800 border border-slate-700 rounded-xl py-2 px-3 text-xs font-mono text-white">' +
+                  '<p class="text-[10px] text-slate-500">Pega el enlace para compartir de Drive, o cualquier URL de descarga directa.</p>' +
+                '</div>' +
+              '</div>' +
+              '<div class="pt-4 border-t border-slate-800 flex justify-end gap-2">' +
+                '<button type="button" onclick="closeManualForm()" class="px-4 py-2 border border-slate-700 rounded-xl text-xs font-bold text-slate-300 hover:bg-slate-800 cursor-pointer">Cancelar</button>' +
+                '<button type="submit" ' + (APP.content.isSubmitting ? 'disabled' : '') + ' class="bg-sky-500 hover:bg-sky-600 text-white px-5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer disabled:opacity-55">' +
+                  (APP.content.isSubmitting ? '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>' : '') + '<span>Guardar</span>' +
+                '</button>' +
+              '</div>' +
+            '</form>' +
+          '</div>' +
+        '</div>';
+    }
+
+    function submitManualForm(ev) {
+      ev.preventDefault();
+      var m = APP.content.editingManual;
+      var title = val('manualFormTitle').trim();
+      if (!title) { APP.content.manualFormError = 'El título es obligatorio.'; renderModals(); return; }
+      var payload = {
+        id: m.id || undefined,
+        title: title,
+        description: val('manualFormDescription'),
+        type: val('manualFormType') || 'General',
+        difficulty: val('manualFormDifficulty'),
+        resourceType: val('manualFormResourceType')
+      };
+
+      APP.content.isSubmitting = true;
+      APP.content.manualFormError = '';
+      renderModals();
+
+      var afterFileResolved = function (downloadUrl, driveFileId) {
+        payload.downloadUrl = downloadUrl;
+        payload.driveFileId = driveFileId || '';
+        gsRun('saveManual', APP.session.token, payload).then(function (res) {
+          APP.content.isSubmitting = false;
+          if (res.success) {
+            closeManualForm();
+            loadData(false);
+            renderMainContent();
+          } else {
+            APP.content.manualFormError = res.error || 'No se pudo guardar.';
+            renderModals();
+          }
+        }).catch(function (err) {
+          APP.content.isSubmitting = false;
+          APP.content.manualFormError = errorMessageOf_(err);
+          renderModals();
+        });
+      };
+
+      if (APP.content.manualUploadMode === 'file') {
+        if (APP.content.pendingManualFile) {
+          gsRun('uploadFileToDrive', APP.session.token, {
+            filename: APP.content.pendingManualFile.filename,
+            mimeType: APP.content.pendingManualFile.mimeType,
+            base64Data: APP.content.pendingManualFile.base64Data,
+            kind: payload.resourceType === 'Controlador' ? 'driver' : 'manual'
+          }).then(function (fileInfo) {
+            afterFileResolved(fileInfo.downloadUrl, fileInfo.fileId);
+          }).catch(function (err) {
+            APP.content.isSubmitting = false;
+            APP.content.manualFormError = errorMessageOf_(err);
+            renderModals();
+          });
+        } else if (m.id && m.downloadUrl) {
+          afterFileResolved(m.downloadUrl, m.driveFileId);
+        } else {
+          APP.content.isSubmitting = false;
+          APP.content.manualFormError = 'Selecciona un archivo para subir.';
+          renderModals();
+        }
+      } else {
+        var url = val('manualLinkInput').trim();
+        if (!url) {
+          APP.content.isSubmitting = false;
+          APP.content.manualFormError = 'Pega un enlace de descarga.';
+          renderModals();
+          return;
+        }
+        if (url.indexOf('drive.google.com') !== -1) {
+          gsRun('linkExistingDriveFile', APP.session.token, url).then(function (res) {
+            if (res.success) {
+              afterFileResolved(res.downloadUrl, res.fileId);
+            } else {
+              APP.content.isSubmitting = false;
+              APP.content.manualFormError = res.error || 'No se pudo usar ese enlace.';
+              renderModals();
+            }
+          }).catch(function (err) {
+            APP.content.isSubmitting = false;
+            APP.content.manualFormError = errorMessageOf_(err);
+            renderModals();
+          });
+        } else {
+          afterFileResolved(url, '');
+        }
+      }
+    }
+
+    function confirmDeleteManual(id) {
+      if (!confirm('¿Eliminar este recurso de forma permanente? También se eliminará el archivo de Drive si fue subido desde aquí.')) return;
+      gsRun('deleteManual', APP.session.token, id).then(function (res) {
+        if (!res.success) alert(res.error || 'No se pudo eliminar.');
+        loadData(false);
+        renderMainContent();
+      });
+    }
+
+    function openVideoForm(id) {
+      var existing = id ? (APP.data.videos || []).filter(function (v) { return v.id === id; })[0] : null;
+      APP.content.editingVideo = existing ? Object.assign({}, existing) : { id: null };
+      APP.content.videoFormError = '';
+      APP.content.videoUploadMode = existing && existing.externalUrl ? 'link' : 'file';
+      APP.content.pendingVideoFile = null;
+      APP.content.isSubmitting = false;
+      renderModals();
+    }
+
+    function closeVideoForm() {
+      APP.content.editingVideo = null;
+      renderModals();
+    }
+
+    function setVideoUploadMode(mode) {
+      APP.content.videoUploadMode = mode;
+      var fileSection = byId('videoFileSection');
+      var linkSection = byId('videoLinkSection');
+      if (fileSection) fileSection.classList.toggle('hidden', mode !== 'file');
+      if (linkSection) linkSection.classList.toggle('hidden', mode !== 'link');
+    }
+
+    function onVideoFileSelected(ev) {
+      var file = ev.target.files[0];
+      if (!file) { APP.content.pendingVideoFile = null; return; }
+      readFileAsBase64_(file, function (info) {
+        APP.content.pendingVideoFile = info;
+        var label = byId('videoFileSelectedLabel');
+        if (label) label.textContent = file.name + ' (' + Math.round(file.size / 1024 / 1024 * 10) / 10 + ' MB)';
+      });
+    }
+
+    function videoFormModalHtml() {
+      var v = APP.content.editingVideo;
+      var isNew = !v.id;
+      var mode = APP.content.videoUploadMode || 'file';
+      return '' +
+        '<div class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">' +
+          '<div class="bg-slate-900 w-full max-w-lg rounded-3xl border border-slate-800 shadow-2xl overflow-hidden animate-fade-in max-h-[90vh] overflow-y-auto custom-scrollbar">' +
+            '<div class="bg-slate-950 border-b border-slate-800 p-5 text-white flex justify-between items-center sticky top-0 z-10">' +
+              '<h3 class="font-bold text-lg text-white">' + (isNew ? 'Nuevo Video de Capacitación' : 'Editar: ' + esc(v.title)) + '</h3>' +
+              '<button onclick="closeVideoForm()" class="p-1.5 hover:bg-white/10 rounded-xl text-white cursor-pointer"><i data-lucide="x" class="w-5 h-5"></i></button>' +
+            '</div>' +
+            '<form onsubmit="submitVideoForm(event)" class="p-6 space-y-4">' +
+              (APP.content.videoFormError ? '<div class="bg-rose-500/10 border border-rose-500/20 text-rose-400 px-4 py-2.5 rounded-xl text-xs font-semibold">' + esc(APP.content.videoFormError) + '</div>' : '') +
+              '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Título</label>' +
+                '<input id="videoFormTitle" type="text" value="' + esc(v.title || '') + '" class="w-full bg-slate-800 border border-slate-700 rounded-xl py-2 px-3 text-sm text-white"></div>' +
+              '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Descripción</label>' +
+                '<textarea id="videoFormDescription" rows="2" class="w-full bg-slate-800 border border-slate-700 rounded-xl py-2 px-3 text-sm text-white">' + esc(v.description || '') + '</textarea></div>' +
+              '<div class="space-y-1"><label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Miniatura (URL, opcional)</label>' +
+                '<input id="videoFormThumbnail" type="text" value="' + esc(v.thumbnail || '') + '" placeholder="https://..." class="w-full bg-slate-800 border border-slate-700 rounded-xl py-2 px-3 text-xs font-mono text-white"></div>' +
+              '<div class="space-y-2">' +
+                '<label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Video</label>' +
+                '<div class="flex gap-2">' +
+                  '<button type="button" onclick="setVideoUploadMode(\'file\')" class="flex-1 py-1.5 rounded-xl text-xs font-bold ' + (mode === 'file' ? 'bg-sky-500 text-white' : 'border border-slate-700 text-slate-300') + '">Subir video</button>' +
+                  '<button type="button" onclick="setVideoUploadMode(\'link\')" class="flex-1 py-1.5 rounded-xl text-xs font-bold ' + (mode === 'link' ? 'bg-sky-500 text-white' : 'border border-slate-700 text-slate-300') + '">Enlace (Drive/YouTube/URL)</button>' +
+                '</div>' +
+                '<div id="videoFileSection" class="' + (mode === 'file' ? '' : 'hidden') + ' space-y-1">' +
+                  '<input id="videoFileInput" type="file" accept="video/*" onchange="onVideoFileSelected(event)" class="w-full text-xs text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-sky-500 file:text-white file:text-xs file:font-bold">' +
+                  '<p id="videoFileSelectedLabel" class="text-[10px] text-slate-500">' + (v.driveFileId ? 'Video actual conservado si no seleccionas uno nuevo.' : 'Ningún archivo seleccionado (máx. ~20 MB; para videos más grandes usa un enlace).') + '</p>' +
+                '</div>' +
+                '<div id="videoLinkSection" class="' + (mode === 'link' ? '' : 'hidden') + ' space-y-1">' +
+                  '<input id="videoLinkInput" type="text" value="' + (mode === 'link' && v.externalUrl ? esc(v.externalUrl) : '') + '" placeholder="https://drive.google.com/... o https://youtube.com/watch?v=..." class="w-full bg-slate-800 border border-slate-700 rounded-xl py-2 px-3 text-xs font-mono text-white">' +
+                '</div>' +
+              '</div>' +
+              '<div class="pt-4 border-t border-slate-800 flex justify-end gap-2">' +
+                '<button type="button" onclick="closeVideoForm()" class="px-4 py-2 border border-slate-700 rounded-xl text-xs font-bold text-slate-300 hover:bg-slate-800 cursor-pointer">Cancelar</button>' +
+                '<button type="submit" ' + (APP.content.isSubmitting ? 'disabled' : '') + ' class="bg-sky-500 hover:bg-sky-600 text-white px-5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer disabled:opacity-55">' +
+                  (APP.content.isSubmitting ? '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>' : '') + '<span>Guardar</span>' +
+                '</button>' +
+              '</div>' +
+            '</form>' +
+          '</div>' +
+        '</div>';
+    }
+
+    function submitVideoForm(ev) {
+      ev.preventDefault();
+      var v = APP.content.editingVideo;
+      var title = val('videoFormTitle').trim();
+      if (!title) { APP.content.videoFormError = 'El título es obligatorio.'; renderModals(); return; }
+      var payload = {
+        id: v.id || undefined,
+        title: title,
+        description: val('videoFormDescription'),
+        thumbnail: val('videoFormThumbnail')
+      };
+
+      APP.content.isSubmitting = true;
+      APP.content.videoFormError = '';
+      renderModals();
+
+      var afterResolved = function (driveFileId, externalUrl) {
+        payload.driveFileId = driveFileId || '';
+        payload.externalUrl = externalUrl || '';
+        gsRun('saveVideo', APP.session.token, payload).then(function (res) {
+          APP.content.isSubmitting = false;
+          if (res.success) {
+            closeVideoForm();
+            loadData(false);
+            renderMainContent();
+          } else {
+            APP.content.videoFormError = res.error || 'No se pudo guardar.';
+            renderModals();
+          }
+        }).catch(function (err) {
+          APP.content.isSubmitting = false;
+          APP.content.videoFormError = errorMessageOf_(err);
+          renderModals();
+        });
+      };
+
+      if (APP.content.videoUploadMode === 'file') {
+        if (APP.content.pendingVideoFile) {
+          gsRun('uploadFileToDrive', APP.session.token, {
+            filename: APP.content.pendingVideoFile.filename,
+            mimeType: APP.content.pendingVideoFile.mimeType,
+            base64Data: APP.content.pendingVideoFile.base64Data,
+            kind: 'video'
+          }).then(function (fileInfo) {
+            afterResolved(fileInfo.fileId, '');
+          }).catch(function (err) {
+            APP.content.isSubmitting = false;
+            APP.content.videoFormError = errorMessageOf_(err);
+            renderModals();
+          });
+        } else if (v.id && v.driveFileId) {
+          afterResolved(v.driveFileId, v.externalUrl);
+        } else {
+          APP.content.isSubmitting = false;
+          APP.content.videoFormError = 'Selecciona un video para subir.';
+          renderModals();
+        }
+      } else {
+        var url = val('videoLinkInput').trim();
+        if (!url) {
+          APP.content.isSubmitting = false;
+          APP.content.videoFormError = 'Pega un enlace de video.';
+          renderModals();
+          return;
+        }
+        if (url.indexOf('drive.google.com') !== -1) {
+          gsRun('linkExistingDriveFile', APP.session.token, url).then(function (res) {
+            if (res.success) {
+              afterResolved(res.fileId, '');
+            } else {
+              APP.content.isSubmitting = false;
+              APP.content.videoFormError = res.error || 'No se pudo usar ese enlace.';
+              renderModals();
+            }
+          }).catch(function (err) {
+            APP.content.isSubmitting = false;
+            APP.content.videoFormError = errorMessageOf_(err);
+            renderModals();
+          });
+        } else {
+          afterResolved('', url);
+        }
+      }
+    }
+
+    function confirmDeleteVideo(id) {
+      if (!confirm('¿Eliminar este video de forma permanente? También se eliminará de Drive si fue subido desde aquí.')) return;
+      gsRun('deleteVideo', APP.session.token, id).then(function (res) {
+        if (!res.success) alert(res.error || 'No se pudo eliminar.');
+        loadData(false);
+        renderMainContent();
+      });
+    }
+
     // -----------------------------------------------------------------------
     // Settings & Sheets
     // -----------------------------------------------------------------------
-    function getPermissionsForRole(role) {
-      if (role === 'Admin Tech') {
-        return ['Acceso completo de administrador', 'Crear, modificar y eliminar cualquier caso técnico', 'Modificar reglas de validación en tiempo real', 'Configurar credenciales del Spreadsheet de Google Sheets', 'Gestionar cuentas de técnicos locales'];
-      }
-      if (role === 'Técnico Nvl 3') {
-        return ['Acceso intermedio de diagnóstico', 'Crear nuevos casos técnicos', 'Modificar cualquier caso técnico', 'Ver biblioteca y descargar manuales', '✕ Prohibido eliminar registros en Google Sheets', '✕ Prohibido modificar reglas de validación o credenciales de Sheets'];
-      }
-      if (role === 'Técnico Nvl 1') {
-        return ['Acceso básico de operador', 'Crear nuevos casos técnicos', 'Modificar únicamente casos técnicos reportados por sí mismo', 'Ver biblioteca y descargar manuales', '✕ Prohibido modificar casos de otros técnicos', '✕ Prohibido eliminar cualquier caso', '✕ Prohibido alterar configuración o validaciones'];
-      }
-      return [];
-    }
-
     function settingsHtml() {
       var d = APP.data;
       var activeUser = getActiveUser();
@@ -1088,23 +1685,9 @@
         return '<div class="leading-tight"><span class="text-gray-500 mr-2">[' + new Date(log.timestamp).toLocaleTimeString() + ']</span><span class="mr-2 font-bold uppercase ' + cls + '">' + esc(log.level) + ':</span><span class="text-gray-200">' + esc(log.message) + '</span></div>';
       }).join('');
 
-      var usersCards = d.users.map(function (u) {
-        var isSelected = d.activeUserId === u.id;
-        var perms = getPermissionsForRole(u.role).map(function (p) {
-          return '<li class="text-[10px] leading-tight ' + (p.indexOf('✕') === 0 ? 'text-rose-400 font-medium' : 'text-slate-300') + '">• ' + esc(p) + '</li>';
-        }).join('');
-        return '' +
-          '<div onclick="handleSelectUser(\'' + u.id + '\')" class="p-4 rounded-2xl border-2 cursor-pointer transition-all ' + (isSelected ? 'border-sky-500 bg-slate-800/80 shadow-sm' : 'border-slate-800 hover:border-sky-500/50 bg-slate-900/20') + '">' +
-            '<div class="flex items-center gap-3 mb-2"><img src="' + esc(u.avatar) + '" class="w-9 h-9 rounded-full object-cover border-2 border-sky-500 shrink-0">' +
-            '<div><div class="flex items-center gap-1.5"><p class="font-bold text-xs text-white">' + esc(u.name) + '</p>' + (isSelected ? '<span class="bg-sky-500 text-white text-[8px] font-bold px-1.5 py-0.5 rounded-full uppercase">Activo</span>' : '') + '</div>' +
-            '<p class="text-[10px] text-slate-400 font-bold leading-none uppercase mt-0.5">' + esc(u.role) + '</p></div></div>' +
-            '<ul class="space-y-1 pl-2 border-l border-slate-800 mt-3">' + perms + '</ul>' +
-          '</div>';
-      }).join('');
-
       return '' +
         '<div class="space-y-6 max-w-7xl mx-auto">' +
-          '<div class="flex flex-col gap-1 bg-slate-900/40 p-6 border border-slate-800 rounded-3xl shadow-sm"><h1 class="font-bold text-2xl text-white">Configuración & Integración</h1><p class="text-slate-400 text-sm">Administre la sincronización con Google Sheets, defina validaciones técnicas y simule accesos restringidos por rol.</p></div>' +
+          '<div class="flex flex-col gap-1 bg-slate-900/40 p-6 border border-slate-800 rounded-3xl shadow-sm"><h1 class="font-bold text-2xl text-white">Configuración & Integración</h1><p class="text-slate-400 text-sm">Administre la sincronización con Google Sheets, defina validaciones técnicas y gestione cuentas de usuario.</p></div>' +
           '<div class="grid grid-cols-1 lg:grid-cols-12 gap-6">' +
             '<div class="lg:col-span-8 space-y-6">' +
               '<div class="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 shadow-sm space-y-6">' +
@@ -1133,9 +1716,8 @@
                 '<div class="font-mono text-[10px] space-y-1.5 max-h-40 overflow-y-auto custom-scrollbar pr-1 bg-slate-900/60 p-3 rounded-2xl border border-slate-800">' + logsHtml + '</div></div>' +
             '</div>' +
             '<div class="lg:col-span-4 space-y-6">' +
-              '<div class="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 shadow-sm space-y-5"><div><h3 class="font-bold text-base text-white flex items-center gap-2"><i data-lucide="shield-alert" class="w-5 h-5 text-sky-400"></i>Permisos Locales por Rol</h3><p class="text-xs text-slate-400 mt-1">Haga clic en un técnico para cambiar la sesión y simular accesos restringidos en tiempo real.</p></div>' +
-                '<div class="space-y-4">' + usersCards + '</div>' +
-              '</div>' +
+              accountCardHtml() +
+              (isAdmin ? usersManagementCardHtml() : '') +
               '<div class="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 shadow-sm space-y-4">' +
                 '<div><h3 class="font-bold text-base text-white flex items-center gap-2"><i data-lucide="sliders" class="w-5 h-5 text-sky-400"></i>Reglas de Validación de Captura</h3><p class="text-xs text-slate-400 mt-1">Configuración en tiempo real para evitar errores de captura en el formulario de incidentes.</p></div>' +
                 (!isAdmin ? '<div class="p-3 bg-rose-500/10 border border-rose-500/20 rounded-xl text-rose-400 text-[10px] font-semibold flex items-center gap-2"><i data-lucide="lock" class="w-4 h-4 shrink-0"></i><span>Se requieren permisos de Admin Tech para alterar estas reglas.</span></div>' : '') +
@@ -1177,7 +1759,7 @@
         apiKey: val('settingsApiKey'),
         autoSyncEnabled: checked('settingsAutoSync')
       };
-      gsRun('saveGoogleSheetsSettings', payload).then(function (res) {
+      gsRun('saveGoogleSheetsSettings', APP.session.token, payload).then(function (res) {
         if (res.success) {
           var msg = byId('sheetsSaveSuccessMsg');
           if (msg) { msg.classList.remove('hidden'); msg.classList.add('flex'); }
@@ -1186,7 +1768,7 @@
         } else {
           alert(res.error || 'No se pudo guardar la configuración.');
         }
-      });
+      }).catch(function (err) { alert(errorMessageOf_(err)); });
     }
 
     function submitRulesForm(ev) {
@@ -1198,7 +1780,7 @@
         requireModelSelection: checked('rulesRequireModel'),
         requireDescription: checked('rulesRequireDesc')
       };
-      gsRun('saveValidationRules', payload).then(function (res) {
+      gsRun('saveValidationRules', APP.session.token, payload).then(function (res) {
         if (res.success) {
           var msg = byId('rulesSaveSuccessMsg');
           if (msg) { msg.classList.remove('hidden'); msg.classList.add('flex'); }
@@ -1207,6 +1789,157 @@
         } else {
           alert(res.error || 'No se pudieron guardar las reglas.');
         }
+      }).catch(function (err) { alert(errorMessageOf_(err)); });
+    }
+
+    function accountCardHtml() {
+      var u = getActiveUser();
+      return '' +
+        '<div class="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 shadow-sm space-y-4">' +
+          '<h3 class="font-bold text-base text-white flex items-center gap-2"><i data-lucide="user-cog" class="w-5 h-5 text-sky-400"></i>Mi Cuenta</h3>' +
+          '<form onsubmit="submitAccountForm(event)" class="space-y-3">' +
+            '<div class="space-y-1"><label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Nombre</label><input id="accountName" type="text" value="' + esc(u.name) + '" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-xs"></div>' +
+            '<div class="space-y-1"><label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Usuario</label><input type="text" value="' + esc(u.username || '') + '" disabled class="w-full bg-slate-800 border border-slate-700 text-slate-400 rounded-xl py-2 px-3 text-xs disabled:opacity-60"></div>' +
+            '<div class="pt-2 border-t border-slate-800 space-y-3">' +
+              '<p class="text-[10px] font-bold text-slate-500 uppercase">Cambiar contraseña (opcional)</p>' +
+              '<div class="space-y-1"><label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Contraseña actual</label><input id="accountCurrentPassword" type="password" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-xs"></div>' +
+              '<div class="space-y-1"><label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Nueva contraseña</label><input id="accountNewPassword" type="password" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-xs"></div>' +
+            '</div>' +
+            '<div id="accountSuccessMsg" class="hidden bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 px-3 py-1.5 rounded-xl text-[10px] font-semibold">Cuenta actualizada correctamente.</div>' +
+            '<button type="submit" class="w-full bg-sky-500 hover:bg-sky-600 text-white py-2 rounded-xl text-xs font-bold cursor-pointer">Guardar Cambios</button>' +
+          '</form>' +
+        '</div>';
+    }
+
+    function submitAccountForm(ev) {
+      ev.preventDefault();
+      var payload = { name: val('accountName') };
+      var newPassword = val('accountNewPassword');
+      if (newPassword) {
+        payload.currentPassword = val('accountCurrentPassword');
+        payload.newPassword = newPassword;
+      }
+      gsRun('updateOwnProfile', APP.session.token, payload).then(function (res) {
+        if (res.success) {
+          APP.data.currentUser = res.user;
+          var msg = byId('accountSuccessMsg');
+          if (msg) {
+            msg.classList.remove('hidden');
+            setTimeout(function () { msg.classList.add('hidden'); }, 3000);
+          }
+          var pwEl = byId('accountCurrentPassword'); if (pwEl) pwEl.value = '';
+          var pw2El = byId('accountNewPassword'); if (pw2El) pw2El.value = '';
+          loadData(false);
+        } else {
+          alert(res.error || 'No se pudo actualizar la cuenta.');
+        }
+      }).catch(function (err) { alert(errorMessageOf_(err)); });
+    }
+
+    function usersManagementCardHtml() {
+      var rows = APP.data.users.map(function (u) {
+        return '' +
+          '<div class="flex items-center justify-between gap-3 bg-slate-950/40 border border-slate-800 rounded-xl px-3 py-2.5">' +
+            '<div class="flex items-center gap-2.5 min-w-0"><img src="' + esc(u.avatar) + '" class="w-8 h-8 rounded-full object-cover shrink-0">' +
+            '<div class="min-w-0"><p class="text-xs font-bold text-white truncate">' + esc(u.name) + '</p><p class="text-[10px] text-slate-400 truncate">@' + esc(u.username || '') + ' · ' + esc(u.role) + '</p></div></div>' +
+            '<div class="flex items-center gap-1 shrink-0">' +
+              '<button onclick="openUserForm(\'' + esc(u.id) + '\')" class="p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white rounded-lg cursor-pointer" title="Editar"><i data-lucide="edit-3" class="w-3.5 h-3.5"></i></button>' +
+              '<button onclick="confirmDeleteUser(\'' + esc(u.id) + '\')" class="p-1.5 text-rose-400 hover:bg-rose-500/10 rounded-lg cursor-pointer" title="Eliminar"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>' +
+            '</div>' +
+          '</div>';
+      }).join('');
+      return '' +
+        '<div class="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 shadow-sm space-y-4">' +
+          '<div class="flex justify-between items-center"><h3 class="font-bold text-base text-white flex items-center gap-2"><i data-lucide="users" class="w-5 h-5 text-sky-400"></i>Gestión de Usuarios</h3>' +
+          '<button onclick="openUserForm()" class="text-xs text-sky-400 font-bold hover:underline flex items-center gap-1"><i data-lucide="plus" class="w-3.5 h-3.5"></i>Nuevo</button></div>' +
+          '<div class="space-y-2 max-h-[320px] overflow-y-auto custom-scrollbar pr-1">' + rows + '</div>' +
+        '</div>';
+    }
+
+    function openUserForm(id) {
+      var existing = id ? APP.data.users.filter(function (u) { return u.id === id; })[0] : null;
+      APP.usersMgmt.editingUser = existing ? Object.assign({}, existing) : { id: null, role: 'Técnico Nvl 1' };
+      APP.usersMgmt.formError = '';
+      APP.usersMgmt.isSubmitting = false;
+      renderModals();
+    }
+
+    function closeUserForm() {
+      APP.usersMgmt.editingUser = null;
+      renderModals();
+    }
+
+    function userFormModalHtml() {
+      var u = APP.usersMgmt.editingUser;
+      var isNew = !u.id;
+      var roleOptions = ['Admin Tech', 'Técnico Nvl 3', 'Técnico Nvl 1'].map(function (r) {
+        return '<option value="' + r + '" ' + (u.role === r ? 'selected' : '') + '>' + r + '</option>';
+      }).join('');
+      return '' +
+        '<div class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">' +
+          '<div class="bg-slate-900 w-full max-w-md rounded-3xl border border-slate-800 shadow-2xl overflow-hidden animate-fade-in">' +
+            '<div class="bg-slate-950 border-b border-slate-800 p-5 text-white flex justify-between items-center">' +
+              '<h3 class="font-bold text-lg text-white">' + (isNew ? 'Nuevo Usuario' : 'Editar Usuario') + '</h3>' +
+              '<button onclick="closeUserForm()" class="p-1.5 hover:bg-white/10 rounded-xl text-white cursor-pointer"><i data-lucide="x" class="w-5 h-5"></i></button>' +
+            '</div>' +
+            '<form onsubmit="submitUserForm(event)" class="p-6 space-y-3">' +
+              (APP.usersMgmt.formError ? '<div class="bg-rose-500/10 border border-rose-500/20 text-rose-400 px-3 py-2 rounded-xl text-xs font-semibold">' + esc(APP.usersMgmt.formError) + '</div>' : '') +
+              '<div class="space-y-1"><label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Nombre</label><input id="userFormName" type="text" value="' + esc(u.name || '') + '" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-sm"></div>' +
+              (isNew ? '<div class="space-y-1"><label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Usuario</label><input id="userFormUsername" type="text" placeholder="usuario.tecnico" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-sm"></div>' : '') +
+              '<div class="space-y-1"><label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Rol</label><select id="userFormRole" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-sm">' + roleOptions + '</select></div>' +
+              '<div class="space-y-1"><label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Nivel (texto libre)</label><input id="userFormLevel" type="text" value="' + esc(u.level || '') + '" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-sm"></div>' +
+              '<div class="space-y-1"><label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">' + (isNew ? 'Contraseña' : 'Restablecer contraseña (opcional)') + '</label><input id="userFormPassword" type="password" placeholder="' + (isNew ? '' : 'Dejar en blanco para no cambiarla') + '" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-sm"></div>' +
+              '<div class="pt-3 border-t border-slate-800 flex justify-end gap-2">' +
+                '<button type="button" onclick="closeUserForm()" class="px-4 py-2 border border-slate-700 rounded-xl text-xs font-bold text-slate-300 hover:bg-slate-800 cursor-pointer">Cancelar</button>' +
+                '<button type="submit" ' + (APP.usersMgmt.isSubmitting ? 'disabled' : '') + ' class="bg-sky-500 hover:bg-sky-600 text-white px-5 py-2 rounded-xl text-xs font-bold cursor-pointer disabled:opacity-55">Guardar</button>' +
+              '</div>' +
+            '</form>' +
+          '</div>' +
+        '</div>';
+    }
+
+    function submitUserForm(ev) {
+      ev.preventDefault();
+      var u = APP.usersMgmt.editingUser;
+      var name = val('userFormName').trim();
+      var role = val('userFormRole');
+      var level = val('userFormLevel');
+      var password = val('userFormPassword');
+
+      APP.usersMgmt.isSubmitting = true;
+      APP.usersMgmt.formError = '';
+      renderModals();
+
+      if (!u.id) {
+        var username = val('userFormUsername').trim();
+        if (!password) {
+          APP.usersMgmt.isSubmitting = false;
+          APP.usersMgmt.formError = 'La contraseña es obligatoria.';
+          renderModals();
+          return;
+        }
+        gsRun('adminCreateUser', APP.session.token, { name: name, username: username, password: password, role: role, level: level }).then(function (res) {
+          APP.usersMgmt.isSubmitting = false;
+          if (res.success) { closeUserForm(); loadData(false); renderMainContent(); }
+          else { APP.usersMgmt.formError = res.error; renderModals(); }
+        }).catch(function (err) { APP.usersMgmt.isSubmitting = false; APP.usersMgmt.formError = errorMessageOf_(err); renderModals(); });
+      } else {
+        var payload = { name: name, role: role, level: level };
+        if (password) payload.newPassword = password;
+        gsRun('adminUpdateUser', APP.session.token, u.id, payload).then(function (res) {
+          APP.usersMgmt.isSubmitting = false;
+          if (res.success) { closeUserForm(); loadData(false); renderMainContent(); }
+          else { APP.usersMgmt.formError = res.error; renderModals(); }
+        }).catch(function (err) { APP.usersMgmt.isSubmitting = false; APP.usersMgmt.formError = errorMessageOf_(err); renderModals(); });
+      }
+    }
+
+    function confirmDeleteUser(id) {
+      if (!confirm('¿Eliminar este usuario de forma permanente?')) return;
+      gsRun('adminDeleteUser', APP.session.token, id).then(function (res) {
+        if (!res.success) alert(res.error);
+        loadData(false);
+        renderMainContent();
       });
     }
 
@@ -1220,6 +1953,10 @@
       if (APP.editingCase) html += caseModalHtml();
       if (APP.inspectingLogsCase) html += auditModalHtml();
       if (APP.training.selectedCourseId) html += courseModalHtml();
+      if (APP.training.playingVideoId) html += videoPlayerModalHtml();
+      if (APP.content.editingManual) html += manualFormModalHtml();
+      if (APP.content.editingVideo) html += videoFormModalHtml();
+      if (APP.usersMgmt.editingUser) html += userFormModalHtml();
       root.innerHTML = html;
       refreshIcons();
     }
