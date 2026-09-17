@@ -1398,7 +1398,6 @@
       ev.preventDefault();
       var m = APP.content.editingManual;
       var title = val('manualFormTitle').trim();
-      if (!title) { APP.content.manualFormError = 'El título es obligatorio.'; renderModals(); return; }
       var payload = {
         id: m.id || undefined,
         title: title,
@@ -1407,6 +1406,35 @@
         difficulty: val('manualFormDifficulty'),
         resourceType: val('manualFormResourceType')
       };
+
+      // Importante: leer TODOS los campos (incluido el modo y el enlace)
+      // ANTES de cualquier renderModals() de aquí en adelante. renderModals()
+      // reconstruye el modal por completo desde `m`, así que si lo hiciéramos
+      // después, leeríamos un <input> recién creado (vacío) en vez del que el
+      // usuario acaba de escribir. También guardamos lo ya escrito en `m`
+      // para que, si el modal se vuelve a renderizar por un error, no se
+      // pierda lo que el usuario ya llenó.
+      var mode = APP.content.manualUploadMode;
+      var linkUrl = mode === 'link' ? val('manualLinkInput').trim() : '';
+      m.title = title;
+      m.description = payload.description;
+      m.type = payload.type;
+      m.difficulty = payload.difficulty;
+      m.resourceType = payload.resourceType;
+      if (mode === 'link') m.downloadUrl = linkUrl;
+
+      if (!title) { APP.content.manualFormError = 'El título es obligatorio.'; renderModals(); return; }
+
+      if (mode === 'link' && !linkUrl) {
+        APP.content.manualFormError = 'Pega un enlace de descarga.';
+        renderModals();
+        return;
+      }
+      if (mode === 'file' && !APP.content.pendingManualFile && !(m.id && m.downloadUrl)) {
+        APP.content.manualFormError = 'Selecciona un archivo para subir.';
+        renderModals();
+        return;
+      }
 
       APP.content.isSubmitting = true;
       APP.content.manualFormError = '';
@@ -1432,7 +1460,7 @@
         });
       };
 
-      if (APP.content.manualUploadMode === 'file') {
+      if (mode === 'file') {
         if (APP.content.pendingManualFile) {
           gsRun('uploadFileToDrive', APP.session.token, {
             filename: APP.content.pendingManualFile.filename,
@@ -1446,23 +1474,12 @@
             APP.content.manualFormError = errorMessageOf_(err);
             renderModals();
           });
-        } else if (m.id && m.downloadUrl) {
-          afterFileResolved(m.downloadUrl, m.driveFileId);
         } else {
-          APP.content.isSubmitting = false;
-          APP.content.manualFormError = 'Selecciona un archivo para subir.';
-          renderModals();
+          afterFileResolved(m.downloadUrl, m.driveFileId);
         }
       } else {
-        var url = val('manualLinkInput').trim();
-        if (!url) {
-          APP.content.isSubmitting = false;
-          APP.content.manualFormError = 'Pega un enlace de descarga.';
-          renderModals();
-          return;
-        }
-        if (url.indexOf('drive.google.com') !== -1) {
-          gsRun('linkExistingDriveFile', APP.session.token, url).then(function (res) {
+        if (linkUrl.indexOf('drive.google.com') !== -1) {
+          gsRun('linkExistingDriveFile', APP.session.token, linkUrl).then(function (res) {
             if (res.success) {
               afterFileResolved(res.downloadUrl, res.fileId);
             } else {
@@ -1476,7 +1493,7 @@
             renderModals();
           });
         } else {
-          afterFileResolved(url, '');
+          afterFileResolved(linkUrl, '');
         }
       }
     }
@@ -1571,13 +1588,39 @@
       ev.preventDefault();
       var v = APP.content.editingVideo;
       var title = val('videoFormTitle').trim();
-      if (!title) { APP.content.videoFormError = 'El título es obligatorio.'; renderModals(); return; }
       var payload = {
         id: v.id || undefined,
         title: title,
         description: val('videoFormDescription'),
         thumbnail: val('videoFormThumbnail')
       };
+
+      // Importante: leer TODOS los campos (incluido el modo y el enlace)
+      // ANTES de cualquier renderModals() de aquí en adelante. renderModals()
+      // reconstruye el modal por completo desde `v`, así que si lo hiciéramos
+      // después, leeríamos un <input> recién creado (vacío) en vez del que el
+      // usuario acaba de escribir. También guardamos lo ya escrito en `v`
+      // para que, si el modal se vuelve a renderizar por un error, no se
+      // pierda lo que el usuario ya llenó.
+      var mode = APP.content.videoUploadMode;
+      var linkUrl = mode === 'link' ? val('videoLinkInput').trim() : '';
+      v.title = title;
+      v.description = payload.description;
+      v.thumbnail = payload.thumbnail;
+      if (mode === 'link') v.externalUrl = linkUrl;
+
+      if (!title) { APP.content.videoFormError = 'El título es obligatorio.'; renderModals(); return; }
+
+      if (mode === 'link' && !linkUrl) {
+        APP.content.videoFormError = 'Pega un enlace de video.';
+        renderModals();
+        return;
+      }
+      if (mode === 'file' && !APP.content.pendingVideoFile && !(v.id && v.driveFileId)) {
+        APP.content.videoFormError = 'Selecciona un video para subir.';
+        renderModals();
+        return;
+      }
 
       APP.content.isSubmitting = true;
       APP.content.videoFormError = '';
@@ -1603,7 +1646,7 @@
         });
       };
 
-      if (APP.content.videoUploadMode === 'file') {
+      if (mode === 'file') {
         if (APP.content.pendingVideoFile) {
           gsRun('uploadFileToDrive', APP.session.token, {
             filename: APP.content.pendingVideoFile.filename,
@@ -1617,23 +1660,12 @@
             APP.content.videoFormError = errorMessageOf_(err);
             renderModals();
           });
-        } else if (v.id && v.driveFileId) {
-          afterResolved(v.driveFileId, v.externalUrl);
         } else {
-          APP.content.isSubmitting = false;
-          APP.content.videoFormError = 'Selecciona un video para subir.';
-          renderModals();
+          afterResolved(v.driveFileId, v.externalUrl);
         }
       } else {
-        var url = val('videoLinkInput').trim();
-        if (!url) {
-          APP.content.isSubmitting = false;
-          APP.content.videoFormError = 'Pega un enlace de video.';
-          renderModals();
-          return;
-        }
-        if (url.indexOf('drive.google.com') !== -1) {
-          gsRun('linkExistingDriveFile', APP.session.token, url).then(function (res) {
+        if (linkUrl.indexOf('drive.google.com') !== -1) {
+          gsRun('linkExistingDriveFile', APP.session.token, linkUrl).then(function (res) {
             if (res.success) {
               afterResolved(res.fileId, '');
             } else {
@@ -1647,7 +1679,7 @@
             renderModals();
           });
         } else {
-          afterResolved('', url);
+          afterResolved('', linkUrl);
         }
       }
     }
