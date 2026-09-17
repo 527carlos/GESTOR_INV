@@ -1223,6 +1223,30 @@
           playerHtml = '<iframe src="' + esc(v.externalUrl) + '" class="w-full h-full" allowfullscreen></iframe>';
         }
       }
+
+      // Respaldo fuera del iframe: mientras Drive termina de procesar un
+      // video recién subido (puede tardar varios minutos), el usuario puede
+      // abrirlo o descargarlo directamente en vez de depender solo del
+      // aviso interno de Drive dentro del reproductor.
+      var footerLinks = '';
+      if (v.driveFileId) {
+        var viewUrl = 'https://drive.google.com/file/d/' + esc(v.driveFileId) + '/view';
+        var downloadUrl = 'https://drive.google.com/uc?export=download&id=' + esc(v.driveFileId);
+        footerLinks = '' +
+          '<div class="p-3 bg-slate-950 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">' +
+            '<p class="text-[10px] text-slate-500">Si el video tarda en procesarse en Drive, ábrelo directamente o descárgalo.</p>' +
+            '<div class="flex gap-2">' +
+              '<a href="' + viewUrl + '" target="_blank" rel="noopener" class="px-3 py-1.5 border border-slate-700 rounded-lg text-[11px] font-bold text-slate-300 hover:bg-slate-800 flex items-center gap-1.5"><i data-lucide="external-link" class="w-3.5 h-3.5"></i>Abrir en Drive</a>' +
+              '<a href="' + downloadUrl + '" target="_blank" rel="noopener" class="px-3 py-1.5 bg-sky-500 hover:bg-sky-600 rounded-lg text-[11px] font-bold text-white flex items-center gap-1.5"><i data-lucide="download" class="w-3.5 h-3.5"></i>Descargar</a>' +
+            '</div>' +
+          '</div>';
+      } else if (v.externalUrl) {
+        footerLinks = '' +
+          '<div class="p-3 bg-slate-950 border-t border-slate-800 flex justify-end">' +
+            '<a href="' + esc(v.externalUrl) + '" target="_blank" rel="noopener" class="px-3 py-1.5 border border-slate-700 rounded-lg text-[11px] font-bold text-slate-300 hover:bg-slate-800 flex items-center gap-1.5"><i data-lucide="external-link" class="w-3.5 h-3.5"></i>Abrir en pestaña nueva</a>' +
+          '</div>';
+      }
+
       return '' +
         '<div class="fixed inset-0 bg-slate-950/90 backdrop-blur-sm z-50 flex items-center justify-center p-4">' +
           '<div class="bg-slate-900 w-full max-w-3xl rounded-3xl border border-slate-800 shadow-2xl overflow-hidden animate-fade-in">' +
@@ -1231,6 +1255,7 @@
               '<button onclick="closeVideoPlayer()" class="p-1.5 hover:bg-white/10 rounded-xl text-white cursor-pointer shrink-0"><i data-lucide="x" class="w-5 h-5"></i></button>' +
             '</div>' +
             '<div class="aspect-video bg-black">' + playerHtml + '</div>' +
+            footerLinks +
           '</div>' +
         '</div>';
     }
