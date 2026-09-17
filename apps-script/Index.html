@@ -29,7 +29,74 @@
     .animate-fade-in { animation: fadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
     input[type="range"].accent-sky-500 { accent-color: #0ea5e9; }
     input[type="file"]::file-selector-button { cursor: pointer; }
+
+    /* --------------------------------------------------------------------
+       Tema claro: se activa poniendo data-theme="light" en <html>. En vez
+       de reescribir cada clase de Tailwind en el HTML con variantes dark:,
+       sobreescribimos aquí los colores base — así el cambio de tema es
+       instantáneo (solo cambia el atributo) y no depende de volver a
+       renderizar nada.
+       -------------------------------------------------------------------- */
+    [data-theme="light"] { color-scheme: light; }
+    [data-theme="light"] body {
+      background-color: #f8fafc;
+      background-image: radial-gradient(rgba(14, 165, 233, 0.05) 1px, transparent 0);
+      color: #0f172a;
+    }
+    [data-theme="light"] .bg-slate-950,
+    [data-theme="light"] .bg-slate-950\/30,
+    [data-theme="light"] .bg-slate-950\/40,
+    [data-theme="light"] .bg-slate-950\/50,
+    [data-theme="light"] .bg-slate-950\/60,
+    [data-theme="light"] .bg-slate-950\/70,
+    [data-theme="light"] .bg-slate-950\/80,
+    [data-theme="light"] .bg-slate-950\/90 { background-color: #ffffff !important; }
+    [data-theme="light"] .bg-slate-900,
+    [data-theme="light"] .bg-slate-900\/10,
+    [data-theme="light"] .bg-slate-900\/20,
+    [data-theme="light"] .bg-slate-900\/40,
+    [data-theme="light"] .bg-slate-900\/50,
+    [data-theme="light"] .bg-slate-900\/60,
+    [data-theme="light"] .bg-slate-900\/90,
+    [data-theme="light"] .bg-slate-900\/95 { background-color: #ffffff !important; }
+    [data-theme="light"] .bg-slate-800,
+    [data-theme="light"] .bg-slate-800\/20,
+    [data-theme="light"] .bg-slate-800\/30,
+    [data-theme="light"] .bg-slate-800\/50,
+    [data-theme="light"] .bg-slate-800\/60,
+    [data-theme="light"] .bg-slate-800\/80 { background-color: #eef2f7 !important; }
+    [data-theme="light"] .bg-slate-700,
+    [data-theme="light"] .bg-gray-700,
+    [data-theme="light"] .bg-gray-800 { background-color: #e2e8f0 !important; }
+    [data-theme="light"] .border-slate-700,
+    [data-theme="light"] .border-slate-700\/80,
+    [data-theme="light"] .border-slate-800,
+    [data-theme="light"] .border-slate-800\/80,
+    [data-theme="light"] .border-slate-900,
+    [data-theme="light"] .border-gray-600 { border-color: #dde3ec !important; }
+    [data-theme="light"] .text-white { color: #0f172a !important; }
+    [data-theme="light"] .text-slate-200 { color: #1e293b !important; }
+    [data-theme="light"] .text-slate-300 { color: #334155 !important; }
+    [data-theme="light"] .text-slate-400 { color: #64748b !important; }
+    [data-theme="light"] .text-slate-500 { color: #94a3b8 !important; }
+    [data-theme="light"] .text-gray-200 { color: #334155 !important; }
+    [data-theme="light"] .text-gray-500 { color: #94a3b8 !important; }
+    [data-theme="light"] .placeholder-slate-500::placeholder { color: #94a3b8 !important; }
+    [data-theme="light"] .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; }
+    [data-theme="light"] .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    .theme-icon-light { display: none; }
+    [data-theme="light"] .theme-icon-dark { display: none; }
+    [data-theme="light"] .theme-icon-light { display: inline-block; }
   </style>
+  <script>
+    // Aplicar el tema guardado ANTES de pintar nada, para evitar parpadeo.
+    (function () {
+      try {
+        var saved = localStorage.getItem('isera_theme');
+        if (saved === 'light') document.documentElement.setAttribute('data-theme', 'light');
+      } catch (e) { /* almacenamiento no disponible */ }
+    })();
+  </script>
 </head>
 <body>
   <div id="root"></div>
@@ -52,6 +119,27 @@
     ];
     var LIBRARY_CATEGORIES = ['Todos', 'Inyección de Tinta', 'Láser', 'Gran Formato', 'Térmicas'];
     var TOKEN_STORAGE_KEY = 'isera_token';
+    // Módulos que un Admin Tech puede restringir por usuario (debe coincidir con VALID_MODULES en Code.gs).
+    var RESTRICTABLE_MODULES = [
+      { id: 'dashboard', label: 'Dashboard' },
+      { id: 'library', label: 'Instructivos' },
+      { id: 'training', label: 'Capacitación' },
+      { id: 'cases', label: 'Gestión de Casos' }
+    ];
+
+    function isModuleAllowed(user, moduleId) {
+      if (!user || !user.allowedModules || user.allowedModules.length === 0) return true;
+      return user.allowedModules.indexOf(moduleId) !== -1;
+    }
+
+    function visibleNavItems() {
+      var user = getActiveUser();
+      return NAV_ITEMS.filter(function (item) {
+        if (item.id === 'content') return user.role === 'Admin Tech';
+        if (item.id === 'settings') return true;
+        return isModuleAllowed(user, item.id);
+      });
+    }
 
     // -----------------------------------------------------------------------
     // App state
@@ -65,7 +153,7 @@
       formError: '',
       isSubmitting: false,
       inspectingLogsCase: null,
-      library: { selectedType: 'Todos', resourceType: 'Manual', search: '', downloadingManual: null },
+      library: { selectedType: 'Todos', resourceType: 'Manual', search: '', downloadingManual: null, viewingManualId: null },
       training: { selectedCourseId: null, sessionRequested: false, playingVideoId: null },
       content: {
         editingManual: null, manualFormError: '', manualUploadMode: 'file', pendingManualFile: null,
@@ -126,6 +214,15 @@
 
     function refreshIcons() { if (window.lucide) lucide.createIcons(); }
 
+    function toggleTheme() {
+      var root = document.documentElement;
+      var isLight = root.getAttribute('data-theme') === 'light';
+      var next = isLight ? 'dark' : 'light';
+      if (next === 'light') root.setAttribute('data-theme', 'light');
+      else root.removeAttribute('data-theme');
+      try { localStorage.setItem('isera_theme', next); } catch (e) { /* almacenamiento no disponible */ }
+    }
+
     function readFileAsBase64_(file, onDone) {
       var reader = new FileReader();
       reader.onload = function () {
@@ -167,7 +264,7 @@
         if (showSpinner) {
           setTimeout(function () { APP.isSyncing = false; renderAll(); }, 500);
         } else if (!APP.editingCase && !APP.inspectingLogsCase && !APP.training.selectedCourseId &&
-          !APP.content.editingManual && !APP.content.editingVideo && !APP.usersMgmt.editingUser) {
+          !APP.library.viewingManualId && !APP.content.editingManual && !APP.content.editingVideo && !APP.usersMgmt.editingUser) {
           renderAll();
         }
       }).catch(function (err) {
@@ -237,7 +334,10 @@
 
     function loginScreenHtml() {
       return '' +
-        '<div class="min-h-screen bg-slate-950 flex items-center justify-center p-4">' +
+        '<div class="min-h-screen bg-slate-950 flex items-center justify-center p-4 relative">' +
+          '<button onclick="toggleTheme()" title="Cambiar contraste claro/oscuro" class="absolute top-4 right-4 p-2 text-slate-400 hover:bg-slate-800 rounded-full transition-colors">' +
+            '<i data-lucide="sun" class="theme-icon-dark w-5 h-5"></i><i data-lucide="moon" class="theme-icon-light w-5 h-5"></i>' +
+          '</button>' +
           '<div class="w-full max-w-sm bg-slate-900/60 border border-slate-800 rounded-3xl shadow-2xl p-8 space-y-6">' +
             '<div class="flex flex-col items-center gap-3 text-center">' +
               '<div class="w-14 h-14 bg-sky-500/10 flex items-center justify-center rounded-2xl border border-sky-500/20 text-sky-400"><i data-lucide="database" class="w-7 h-7"></i></div>' +
@@ -285,6 +385,10 @@
         return;
       }
       try {
+        var allowedTabs = visibleNavItems();
+        if (!allowedTabs.some(function (item) { return item.id === APP.activeTab; })) {
+          APP.activeTab = allowedTabs.length > 0 ? allowedTabs[0].id : 'settings';
+        }
         root.innerHTML = layoutHtml();
         renderMainContent();
         renderModals();
@@ -328,7 +432,7 @@
     }
 
     function navButtonsHtml(extraClass) {
-      return NAV_ITEMS.map(function (item) {
+      return visibleNavItems().map(function (item) {
         var isActive = APP.activeTab === item.id;
         return '' +
           '<button onclick="setActiveTab(\'' + item.id + '\')" class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ' + extraClass + ' ' +
@@ -408,6 +512,9 @@
           '</div>' +
           '<div class="flex items-center gap-3">' +
             '<div class="hidden lg:flex items-center gap-2 bg-slate-900 border border-slate-800 rounded-full px-3 py-1 text-xs text-sky-400 font-medium"><i data-lucide="database-zap" class="w-3.5 h-3.5"></i><span>G-Sheets Activo</span></div>' +
+            '<button onclick="toggleTheme()" title="Cambiar contraste claro/oscuro" class="p-2 text-slate-400 hover:bg-slate-800 rounded-full transition-colors">' +
+              '<i data-lucide="sun" class="theme-icon-dark w-5 h-5"></i><i data-lucide="moon" class="theme-icon-light w-5 h-5"></i>' +
+            '</button>' +
             '<div class="relative">' +
               '<button onclick="byId(\'notifPopup\').classList.toggle(\'hidden\')" class="p-2 text-slate-400 hover:bg-slate-800 rounded-full transition-colors relative">' +
                 '<i data-lucide="bell" class="w-5 h-5"></i><span class="absolute top-1.5 right-1.5 w-2 h-2 bg-rose-500 rounded-full ring-2 ring-slate-950"></span>' +
@@ -450,7 +557,7 @@
     function mobileBottomNavHtml() {
       return '' +
         '<nav class="md:hidden fixed bottom-0 left-0 right-0 bg-slate-900/90 backdrop-blur border-t border-slate-800 h-16 flex items-center justify-around px-2 z-40 shadow-lg overflow-x-auto">' +
-          NAV_ITEMS.map(function (item) {
+          visibleNavItems().map(function (item) {
             var isActive = APP.activeTab === item.id;
             return '' +
               '<button onclick="setActiveTab(\'' + item.id + '\')" class="flex flex-col items-center gap-1 transition-all shrink-0 px-1.5 ' + (isActive ? 'text-sky-400 font-bold' : 'text-slate-400') + '">' +
@@ -511,7 +618,7 @@
           m.difficulty === 'MEDIUM' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
         var diffLabel = m.difficulty === 'HARD' ? 'NIVEL PRO' : m.difficulty === 'MEDIUM' ? 'AVANZADO' : 'BÁSICO';
         return '' +
-          '<div onclick="handleDownloadManualFromDashboard(\'' + esc(m.id) + '\')" class="p-4 flex gap-4 hover:bg-slate-800/50 cursor-pointer group">' +
+          '<div onclick="handleOpenManualFromDashboard(\'' + esc(m.id) + '\')" class="p-4 flex gap-4 hover:bg-slate-800/50 cursor-pointer group">' +
             '<div class="w-24 h-16 rounded-xl bg-slate-800 overflow-hidden shrink-0 relative border border-slate-700"><img src="' + esc(m.image) + '" class="w-full h-full object-cover filter grayscale group-hover:grayscale-0 transition-all duration-300"></div>' +
             '<div class="flex-grow flex flex-col justify-between">' +
               '<p class="font-semibold text-sm text-white group-hover:text-sky-400 transition-colors line-clamp-1">' + esc(m.title) + '</p>' +
@@ -600,15 +707,10 @@
       openCreateCaseModal();
     }
 
-    function handleDownloadManualFromDashboard(manualId) {
-      gsRun('downloadManual', APP.session.token, manualId).then(function (res) {
-        APP.activeTab = 'library';
-        if (res.success && res.manual.downloadUrl && res.manual.downloadUrl !== '#') {
-          window.open(res.manual.downloadUrl, '_blank');
-        }
-        loadData(false);
-        renderAll();
-      });
+    function handleOpenManualFromDashboard(manualId) {
+      APP.activeTab = 'library';
+      renderAll();
+      openManualViewer(manualId);
     }
 
     // -----------------------------------------------------------------------
@@ -1006,26 +1108,65 @@
         return;
       }
 
+      var canDownload = getActiveUser().canDownload !== false;
       grid.innerHTML = filtered.map(function (m) {
         var diffBadge = m.difficulty === 'HARD' ? 'bg-rose-500 text-white' : m.difficulty === 'MEDIUM' ? 'bg-amber-500 text-white' : 'bg-emerald-500 text-white';
+        var downloadBtn = canDownload
+          ? '<button onclick="handleDownloadManual(\'' + esc(m.id) + '\')" class="flex items-center gap-1.5 px-3 py-2 bg-sky-500 text-white rounded-xl font-bold text-xs hover:bg-sky-600 hover:shadow-md transition-colors cursor-pointer"><i data-lucide="download" class="w-3.5 h-3.5"></i><span>Descargar</span></button>'
+          : '<button onclick="alert(\'Necesitas autorización de un Admin Tech para descargar. Pídela desde Gestión de Usuarios.\')" class="flex items-center gap-1.5 px-3 py-2 bg-slate-800 text-slate-500 rounded-xl font-bold text-xs cursor-not-allowed" title="Requiere autorización de descarga"><i data-lucide="lock" class="w-3.5 h-3.5"></i><span>Descargar</span></button>';
         return '' +
           '<div class="group bg-slate-900/40 border border-slate-800 rounded-3xl overflow-hidden hover:shadow-lg transition-all flex flex-col h-full">' +
-            '<div class="h-44 overflow-hidden relative border-b border-slate-800 bg-slate-950">' +
+            '<div class="h-44 overflow-hidden relative border-b border-slate-800 bg-slate-950 cursor-pointer" onclick="openManualViewer(\'' + esc(m.id) + '\')">' +
               '<img src="' + esc(m.image) + '" class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105 filter saturate-[0.8]">' +
               '<span class="absolute top-3 right-3 px-2.5 py-1 rounded-xl text-[10px] font-bold uppercase tracking-wider shadow-sm ' + diffBadge + '">' + esc(m.difficulty) + '</span>' +
             '</div>' +
             '<div class="p-5 flex flex-col gap-4 flex-grow justify-between">' +
               '<div class="space-y-1.5"><span class="text-[10px] text-sky-400 font-bold uppercase tracking-widest bg-slate-800 px-2 py-0.5 rounded">' + esc(m.type) + '</span>' +
-              '<h3 class="font-bold text-base text-white group-hover:text-sky-400 transition-colors line-clamp-1 leading-snug">' + esc(m.title) + '</h3>' +
+              '<h3 class="font-bold text-base text-white group-hover:text-sky-400 transition-colors line-clamp-1 leading-snug cursor-pointer" onclick="openManualViewer(\'' + esc(m.id) + '\')">' + esc(m.title) + '</h3>' +
               '<p class="text-xs text-slate-400 leading-relaxed line-clamp-2">' + esc(m.description) + '</p></div>' +
-              '<div class="pt-4 border-t border-slate-800 flex items-center justify-between mt-auto">' +
-                '<div class="flex items-center gap-3 text-[10px] text-slate-400 font-semibold"><span class="flex items-center gap-1"><i data-lucide="calendar" class="w-3.5 h-3.5 text-sky-400"></i>' + esc(m.date) + '</span><span class="flex items-center gap-1"><i data-lucide="eye" class="w-3.5 h-3.5 text-sky-400"></i>' + m.views + ' Vistas</span></div>' +
-                '<button onclick="handleDownloadManual(\'' + esc(m.id) + '\')" class="flex items-center gap-1.5 px-3.5 py-2 bg-sky-500 text-white rounded-xl font-bold text-xs hover:bg-sky-600 hover:shadow-md transition-colors cursor-pointer"><i data-lucide="download" class="w-3.5 h-3.5"></i><span>Descargar</span></button>' +
+              '<div class="flex items-center gap-3 text-[10px] text-slate-400 font-semibold"><span class="flex items-center gap-1"><i data-lucide="calendar" class="w-3.5 h-3.5 text-sky-400"></i>' + esc(m.date) + '</span><span class="flex items-center gap-1"><i data-lucide="eye" class="w-3.5 h-3.5 text-sky-400"></i>' + m.views + ' Vistas</span></div>' +
+              '<div class="pt-4 border-t border-slate-800 flex items-center gap-2 mt-auto">' +
+                '<button onclick="openManualViewer(\'' + esc(m.id) + '\')" class="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 border border-slate-700 text-slate-300 rounded-xl font-bold text-xs hover:bg-slate-800 transition-colors cursor-pointer"><i data-lucide="eye" class="w-3.5 h-3.5"></i><span>Ver</span></button>' +
+                downloadBtn +
               '</div>' +
             '</div>' +
           '</div>';
       }).join('');
       refreshIcons();
+    }
+
+    function openManualViewer(manualId) {
+      APP.library.viewingManualId = manualId;
+      renderModals();
+    }
+
+    function closeManualViewer() {
+      APP.library.viewingManualId = null;
+      renderModals();
+    }
+
+    function manualViewerModalHtml() {
+      var m = APP.data.manuals.filter(function (x) { return x.id === APP.library.viewingManualId; })[0];
+      if (!m) return '';
+      var previewSrc = m.driveFileId
+        ? 'https://drive.google.com/file/d/' + esc(m.driveFileId) + '/preview'
+        : 'https://docs.google.com/gview?url=' + encodeURIComponent(m.downloadUrl) + '&embedded=true';
+      var canDownload = getActiveUser().canDownload !== false;
+      return '' +
+        '<div class="fixed inset-0 bg-slate-950/90 backdrop-blur-sm z-50 flex items-center justify-center p-4">' +
+          '<div class="bg-slate-900 w-full max-w-4xl h-[85vh] rounded-3xl border border-slate-800 shadow-2xl overflow-hidden animate-fade-in flex flex-col">' +
+            '<div class="bg-slate-950 border-b border-slate-800 p-4 flex justify-between items-center gap-3 shrink-0">' +
+              '<div class="min-w-0"><h3 class="font-bold text-sm text-white truncate">' + esc(m.title) + '</h3><p class="text-[11px] text-slate-400 truncate">' + esc(m.resourceType) + ' · ' + esc(m.type) + '</p></div>' +
+              '<div class="flex items-center gap-2 shrink-0">' +
+                (canDownload
+                  ? '<button onclick="handleDownloadManual(\'' + esc(m.id) + '\')" class="px-3 py-1.5 bg-sky-500 hover:bg-sky-600 text-white rounded-lg text-[11px] font-bold flex items-center gap-1.5 cursor-pointer"><i data-lucide="download" class="w-3.5 h-3.5"></i>Descargar</button>'
+                  : '<span class="px-3 py-1.5 bg-slate-800 text-slate-500 rounded-lg text-[11px] font-bold flex items-center gap-1.5" title="Requiere autorización de descarga"><i data-lucide="lock" class="w-3.5 h-3.5"></i>Descargar</span>') +
+                '<button onclick="closeManualViewer()" class="p-1.5 hover:bg-white/10 rounded-xl text-white cursor-pointer"><i data-lucide="x" class="w-5 h-5"></i></button>' +
+              '</div>' +
+            '</div>' +
+            '<iframe src="' + previewSrc + '" class="flex-1 w-full bg-slate-800"></iframe>' +
+          '</div>' +
+        '</div>';
     }
 
     function handleDownloadManual(manualId) {
@@ -1037,6 +1178,8 @@
             window.open(res.manual.downloadUrl, '_blank');
           }
           setTimeout(function () { APP.library.downloadingManual = null; renderToast(); }, 2500);
+        } else {
+          alert(res.error || 'No se pudo descargar el recurso.');
         }
         loadData(false);
       });
@@ -1504,7 +1647,7 @@
         }
       } else {
         if (linkUrl.indexOf('drive.google.com') !== -1) {
-          gsRun('linkExistingDriveFile', APP.session.token, linkUrl).then(function (res) {
+          gsRun('linkExistingDriveFile', APP.session.token, linkUrl, payload.resourceType === 'Controlador' ? 'driver' : 'manual').then(function (res) {
             if (res.success) {
               afterFileResolved(res.downloadUrl, res.fileId);
             } else {
@@ -1932,20 +2075,33 @@
       var roleOptions = ['Admin Tech', 'Técnico Nvl 3', 'Técnico Nvl 1'].map(function (r) {
         return '<option value="' + r + '" ' + (u.role === r ? 'selected' : '') + '>' + r + '</option>';
       }).join('');
+      var moduleCheckboxes = RESTRICTABLE_MODULES.map(function (m) {
+        var checked = isModuleAllowed(u, m.id);
+        return '<label class="flex items-center gap-2 text-xs text-slate-300 py-0.5 cursor-pointer"><input type="checkbox" class="userFormModuleCheckbox rounded text-sky-500 focus:ring-sky-500 h-4 w-4" value="' + m.id + '" ' + (checked ? 'checked' : '') + '>' + m.label + '</label>';
+      }).join('');
       return '' +
         '<div class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">' +
-          '<div class="bg-slate-900 w-full max-w-md rounded-3xl border border-slate-800 shadow-2xl overflow-hidden animate-fade-in">' +
-            '<div class="bg-slate-950 border-b border-slate-800 p-5 text-white flex justify-between items-center">' +
+          '<div class="bg-slate-900 w-full max-w-md rounded-3xl border border-slate-800 shadow-2xl overflow-hidden animate-fade-in max-h-[90vh] overflow-y-auto custom-scrollbar">' +
+            '<div class="bg-slate-950 border-b border-slate-800 p-5 text-white flex justify-between items-center sticky top-0 z-10">' +
               '<h3 class="font-bold text-lg text-white">' + (isNew ? 'Nuevo Usuario' : 'Editar Usuario') + '</h3>' +
               '<button onclick="closeUserForm()" class="p-1.5 hover:bg-white/10 rounded-xl text-white cursor-pointer"><i data-lucide="x" class="w-5 h-5"></i></button>' +
             '</div>' +
             '<form onsubmit="submitUserForm(event)" class="p-6 space-y-3">' +
               (APP.usersMgmt.formError ? '<div class="bg-rose-500/10 border border-rose-500/20 text-rose-400 px-3 py-2 rounded-xl text-xs font-semibold">' + esc(APP.usersMgmt.formError) + '</div>' : '') +
               '<div class="space-y-1"><label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Nombre</label><input id="userFormName" type="text" value="' + esc(u.name || '') + '" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-sm"></div>' +
-              (isNew ? '<div class="space-y-1"><label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Usuario</label><input id="userFormUsername" type="text" placeholder="usuario.tecnico" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-sm"></div>' : '') +
+              (isNew ? '<div class="space-y-1"><label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Usuario</label><input id="userFormUsername" type="text" value="' + esc(u.username || '') + '" placeholder="usuario.tecnico" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-sm"></div>' : '') +
               '<div class="space-y-1"><label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Rol</label><select id="userFormRole" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-sm">' + roleOptions + '</select></div>' +
               '<div class="space-y-1"><label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Nivel (texto libre)</label><input id="userFormLevel" type="text" value="' + esc(u.level || '') + '" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-sm"></div>' +
               '<div class="space-y-1"><label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">' + (isNew ? 'Contraseña' : 'Restablecer contraseña (opcional)') + '</label><input id="userFormPassword" type="password" placeholder="' + (isNew ? '' : 'Dejar en blanco para no cambiarla') + '" class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl py-2 px-3 text-sm"></div>' +
+              '<div class="pt-2 border-t border-slate-800 space-y-1">' +
+                '<label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Acceso a módulos</label>' +
+                '<p class="text-[10px] text-slate-500 mb-1">Desmarca los que este usuario NO debe ver en el menú.</p>' +
+                moduleCheckboxes +
+              '</div>' +
+              '<div class="flex items-center gap-2.5 pt-2 border-t border-slate-800">' +
+                '<input id="userFormCanDownload" type="checkbox" ' + (u.canDownload !== false ? 'checked' : '') + ' class="rounded text-sky-500 focus:ring-sky-500 h-4 w-4">' +
+                '<label for="userFormCanDownload" class="text-xs text-slate-300 cursor-pointer">Autorizado para descargar instructivos y controladores</label>' +
+              '</div>' +
               '<div class="pt-3 border-t border-slate-800 flex justify-end gap-2">' +
                 '<button type="button" onclick="closeUserForm()" class="px-4 py-2 border border-slate-700 rounded-xl text-xs font-bold text-slate-300 hover:bg-slate-800 cursor-pointer">Cancelar</button>' +
                 '<button type="submit" ' + (APP.usersMgmt.isSubmitting ? 'disabled' : '') + ' class="bg-sky-500 hover:bg-sky-600 text-white px-5 py-2 rounded-xl text-xs font-bold cursor-pointer disabled:opacity-55">Guardar</button>' +
@@ -1958,30 +2114,38 @@
     function submitUserForm(ev) {
       ev.preventDefault();
       var u = APP.usersMgmt.editingUser;
+      // Leer TODOS los campos (incluidos usuario, checkboxes de módulos y
+      // autorización de descarga) antes de mostrar el estado "guardando",
+      // ya que renderModals() reconstruye el formulario desde cero.
       var name = val('userFormName').trim();
       var role = val('userFormRole');
       var level = val('userFormLevel');
       var password = val('userFormPassword');
+      var username = !u.id ? val('userFormUsername').trim() : '';
+      var allowedModules = Array.prototype.slice.call(document.querySelectorAll('.userFormModuleCheckbox:checked')).map(function (el) { return el.value; });
+      var canDownload = checked('userFormCanDownload');
+
+      if (!u.id && !password) {
+        APP.usersMgmt.formError = 'La contraseña es obligatoria.';
+        renderModals();
+        return;
+      }
 
       APP.usersMgmt.isSubmitting = true;
       APP.usersMgmt.formError = '';
       renderModals();
 
       if (!u.id) {
-        var username = val('userFormUsername').trim();
-        if (!password) {
-          APP.usersMgmt.isSubmitting = false;
-          APP.usersMgmt.formError = 'La contraseña es obligatoria.';
-          renderModals();
-          return;
-        }
-        gsRun('adminCreateUser', APP.session.token, { name: name, username: username, password: password, role: role, level: level }).then(function (res) {
+        gsRun('adminCreateUser', APP.session.token, {
+          name: name, username: username, password: password, role: role, level: level,
+          allowedModules: allowedModules, canDownload: canDownload
+        }).then(function (res) {
           APP.usersMgmt.isSubmitting = false;
           if (res.success) { closeUserForm(); loadData(false); renderMainContent(); }
           else { APP.usersMgmt.formError = res.error; renderModals(); }
         }).catch(function (err) { APP.usersMgmt.isSubmitting = false; APP.usersMgmt.formError = errorMessageOf_(err); renderModals(); });
       } else {
-        var payload = { name: name, role: role, level: level };
+        var payload = { name: name, role: role, level: level, allowedModules: allowedModules, canDownload: canDownload };
         if (password) payload.newPassword = password;
         gsRun('adminUpdateUser', APP.session.token, u.id, payload).then(function (res) {
           APP.usersMgmt.isSubmitting = false;
@@ -2011,6 +2175,7 @@
       if (APP.inspectingLogsCase) html += auditModalHtml();
       if (APP.training.selectedCourseId) html += courseModalHtml();
       if (APP.training.playingVideoId) html += videoPlayerModalHtml();
+      if (APP.library.viewingManualId) html += manualViewerModalHtml();
       if (APP.content.editingManual) html += manualFormModalHtml();
       if (APP.content.editingVideo) html += videoFormModalHtml();
       if (APP.usersMgmt.editingUser) html += userFormModalHtml();

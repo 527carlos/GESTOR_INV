@@ -28,12 +28,17 @@ var HISTORIAL_HEADERS = ['caseId', 'timestamp', 'user', 'action', 'detail'];
 var MANUALES_HEADERS = ['id', 'title', 'description', 'type', 'difficulty', 'date', 'views', 'downloadUrl', 'image', 'resourceType', 'driveFileId'];
 var CURSOS_HEADERS = ['id', 'title', 'description', 'duration', 'modulesCount', 'progress', 'completed', 'image'];
 var VIDEOS_HEADERS = ['id', 'title', 'description', 'driveFileId', 'externalUrl', 'thumbnail', 'date'];
-var USUARIOS_HEADERS = ['id', 'name', 'role', 'level', 'avatar', 'username', 'passwordHash'];
+var USUARIOS_HEADERS = ['id', 'name', 'role', 'level', 'avatar', 'username', 'passwordHash', 'allowedModules', 'canDownload'];
 var CONFIG_HEADERS = ['key', 'value'];
 var REGLAS_HEADERS = ['key', 'value'];
 var LOGS_SYNC_HEADERS = ['timestamp', 'level', 'message'];
 
 var VALID_ROLES = ['Admin Tech', 'Técnico Nvl 3', 'Técnico Nvl 1'];
+// Módulos que un Admin Tech puede habilitar/restringir por usuario desde
+// Gestión de Usuarios. "content" y "settings" no están aquí: su acceso ya
+// depende del rol (Admin Tech) y "settings" siempre debe verse porque ahí
+// vive "Mi Cuenta".
+var VALID_MODULES = ['dashboard', 'library', 'training', 'cases'];
 var SESSION_TTL_SECONDS = 21600; // 6 horas (máximo permitido por CacheService)
 var MAX_UPLOAD_BASE64_CHARS = 28 * 1024 * 1024; // ~ archivo real de hasta 20 MB
 
@@ -159,7 +164,20 @@ function slugify_(name) {
 }
 
 function sanitizeUser_(u) {
-  return { id: u.id, name: u.name, role: u.role, level: u.level, avatar: u.avatar, username: u.username };
+  return {
+    id: u.id, name: u.name, role: u.role, level: u.level, avatar: u.avatar, username: u.username,
+    allowedModules: u.allowedModules ? String(u.allowedModules).split(',').map(function (s) { return s.trim(); }).filter(Boolean) : [],
+    canDownload: u.canDownload !== false
+  };
+}
+
+/** Normaliza una lista de módulos recibida del cliente a una cadena CSV para guardar en la hoja. */
+function sanitizeModulesInput_(arr) {
+  if (!Array.isArray(arr)) return '';
+  var valid = arr.filter(function (m) { return VALID_MODULES.indexOf(m) !== -1; });
+  // Si incluye todos los módulos disponibles, se guarda vacío (= sin restricción).
+  if (valid.length >= VALID_MODULES.length) return '';
+  return valid.join(',');
 }
 
 /** Resuelve el token de sesión al usuario actual (leído en vivo de la hoja). Lanza si no es válido. */
@@ -208,9 +226,9 @@ function ensureSetup_() {
 
   if (isSheetEmpty_(usuarios)) {
     writeTable_(usuarios, USUARIOS_HEADERS, [
-      { id: 'user-1', name: 'Admin Tech', role: 'Admin Tech', level: 'Level 4 Technician', avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80', username: 'admin', passwordHash: hashPassword_('admin123') },
-      { id: 'user-2', name: 'Técnico Nvl 3', role: 'Técnico Nvl 3', level: 'Level 3 Technician', avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=150&q=80', username: 'tecnico3', passwordHash: hashPassword_('tecnico123') },
-      { id: 'user-3', name: 'Técnico Nvl 1', role: 'Técnico Nvl 1', level: 'Level 1 Technician', avatar: 'https://images.unsplash.com/photo-1628157582853-a796fa650a6a?auto=format&fit=crop&w=150&q=80', username: 'tecnico1', passwordHash: hashPassword_('tecnico123') }
+      { id: 'user-1', name: 'Admin Tech', role: 'Admin Tech', level: 'Level 4 Technician', avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80', username: 'admin', passwordHash: hashPassword_('admin123'), allowedModules: '', canDownload: true },
+      { id: 'user-2', name: 'Técnico Nvl 3', role: 'Técnico Nvl 3', level: 'Level 3 Technician', avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=150&q=80', username: 'tecnico3', passwordHash: hashPassword_('tecnico123'), allowedModules: '', canDownload: true },
+      { id: 'user-3', name: 'Técnico Nvl 1', role: 'Técnico Nvl 1', level: 'Level 1 Technician', avatar: 'https://images.unsplash.com/photo-1628157582853-a796fa650a6a?auto=format&fit=crop&w=150&q=80', username: 'tecnico1', passwordHash: hashPassword_('tecnico123'), allowedModules: '', canDownload: true }
     ]);
   } else {
     // Migración: hojas creadas antes de tener usuario/contraseña. Se generan
@@ -337,7 +355,13 @@ function initializeSpreadsheet() {
 // ---------------------------------------------------------------------------
 
 function readUsers_(ss) {
-  return readTable_(getOrCreateSheet_(ss, SHEET_NAMES.USUARIOS, USUARIOS_HEADERS), USUARIOS_HEADERS);
+  var rows = readTable_(getOrCreateSheet_(ss, SHEET_NAMES.USUARIOS, USUARIOS_HEADERS), USUARIOS_HEADERS);
+  rows.forEach(function (u) {
+    // Celda vacía o nunca migrada = sin restricción / autorizado por defecto.
+    u.canDownload = !(u.canDownload === false || u.canDownload === 'false');
+    u.allowedModules = u.allowedModules || '';
+  });
+  return rows;
 }
 
 function writeUsers_(ss, users) {
@@ -502,7 +526,20 @@ function resolveDriveLink_(url) {
   return m ? m[1] : null;
 }
 
-/** Sube un archivo (recibido en base64) a una carpeta de Drive del portal. Solo Admin Tech. */
+function isZipBlob_(blob) {
+  var name = blob.getName() || '';
+  return blob.getContentType() === 'application/zip' || /\.zip$/i.test(name);
+}
+
+/** Comprime un blob en un .zip (si no lo está ya). Los controladores siempre se entregan comprimidos. */
+function zipBlobIfNeeded_(blob) {
+  if (isZipBlob_(blob)) return blob;
+  var baseName = blob.getName() || 'controlador';
+  return Utilities.zip([blob], baseName + '.zip');
+}
+
+/** Sube un archivo (recibido en base64) a una carpeta de Drive del portal. Solo Admin Tech.
+ *  Los controladores (kind: 'driver') se comprimen automáticamente en .zip. */
 function uploadFileToDrive(token, payload) {
   requireAdmin_(token);
   var filename = String((payload && payload.filename) || 'archivo');
@@ -518,14 +555,17 @@ function uploadFileToDrive(token, payload) {
 
   var bytes = Utilities.base64Decode(base64Data);
   var blob = Utilities.newBlob(bytes, mimeType, filename);
+  if (kind === 'driver') blob = zipBlobIfNeeded_(blob);
   var folder = getContentFolder_(subfolder);
   var file = folder.createFile(blob);
   file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
   return driveFileUrls_(file.getId());
 }
 
-/** Vincula un archivo de Drive ya existente a partir de su enlace para compartir. Solo Admin Tech. */
-function linkExistingDriveFile(token, url) {
+/** Vincula un archivo de Drive ya existente a partir de su enlace para compartir. Solo Admin Tech.
+ *  Para controladores (kind: 'driver') que no sean ya un .zip, se descarga, se comprime y se
+ *  guarda como una copia nueva en la carpeta Controladores del portal. */
+function linkExistingDriveFile(token, url, kind) {
   requireAdmin_(token);
   var fileId = resolveDriveLink_(url);
   if (!fileId) {
@@ -534,6 +574,16 @@ function linkExistingDriveFile(token, url) {
   try {
     var file = DriveApp.getFileById(fileId);
     try { file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); } catch (eShare) { /* puede no tener permiso para cambiar el compartir; se continúa */ }
+
+    if (kind === 'driver' && !isZipBlob_(file.getBlob())) {
+      var zipped = zipBlobIfNeeded_(file.getBlob());
+      var newFile = getContentFolder_('Controladores').createFile(zipped);
+      newFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+      var zippedUrls = driveFileUrls_(newFile.getId());
+      zippedUrls.success = true;
+      return zippedUrls;
+    }
+
     var urls = driveFileUrls_(fileId);
     urls.success = true;
     return urls;
@@ -799,7 +849,10 @@ function saveValidationRules(token, rules) {
 }
 
 function downloadManual(token, manualId) {
-  validateSession_(token);
+  var user = validateSession_(token);
+  if (user.canDownload === false) {
+    return { success: false, error: 'No tienes autorización para descargar instructivos ni controladores. Pide a un Admin Tech que la habilite desde Gestión de Usuarios.' };
+  }
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
@@ -1054,7 +1107,9 @@ function adminCreateUser(token, payload) {
       name: name, role: role, level: level || role,
       avatar: 'https://ui-avatars.com/api/?background=0ea5e9&color=fff&name=' + encodeURIComponent(name),
       username: username,
-      passwordHash: hashPassword_(password)
+      passwordHash: hashPassword_(password),
+      allowedModules: sanitizeModulesInput_(payload && payload.allowedModules),
+      canDownload: !(payload && payload.canDownload === false)
     };
     users.push(newUser);
     writeUsers_(ss, users);
@@ -1095,7 +1150,13 @@ function adminUpdateUser(token, userId, payload) {
       passwordHash = hashPassword_(payload.newPassword);
     }
 
-    users[idx] = { id: users[idx].id, name: name, role: role, level: level, avatar: users[idx].avatar, username: users[idx].username, passwordHash: passwordHash };
+    var allowedModules = payload.allowedModules !== undefined ? sanitizeModulesInput_(payload.allowedModules) : users[idx].allowedModules;
+    var canDownload = payload.canDownload !== undefined ? !!payload.canDownload : users[idx].canDownload;
+
+    users[idx] = {
+      id: users[idx].id, name: name, role: role, level: level, avatar: users[idx].avatar, username: users[idx].username,
+      passwordHash: passwordHash, allowedModules: allowedModules, canDownload: canDownload
+    };
     writeUsers_(ss, users);
     addSyncLog_(ss, 'info', 'Usuario actualizado: ' + name);
     return { success: true, user: sanitizeUser_(users[idx]) };

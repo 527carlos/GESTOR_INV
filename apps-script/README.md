@@ -22,8 +22,17 @@ de usuarios**.
 - **Dashboard**: resumen de casos, instructivos populares y accesos rápidos.
 - **Gestión de Casos**: alta/edición/eliminación de casos técnicos con
   validaciones configurables, permisos por rol e historial de auditoría.
-- **Instructivos**: biblioteca de manuales **y controladores (drivers)**,
-  con pestañas separadas, búsqueda, categorías y descarga directa del archivo.
+- **Instructivos**: biblioteca de manuales **y controladores (drivers)**, con
+  pestañas separadas, búsqueda y categorías.
+  - **Ver**: abre el instructivo en una **ventana emergente** (modal con vista
+    previa embebida) sin necesidad de autorización — cualquier usuario logueado
+    puede consultarlo.
+  - **Descargar**: requiere que un Admin Tech haya marcado al usuario como
+    "Autorizado para descargar" en Gestión de Usuarios; si no, el botón queda
+    bloqueado con un aviso.
+  - Los **controladores (drivers)** siempre se entregan **comprimidos en
+    .zip**, tanto si se subieron directamente como si se vinculó un archivo de
+    Drive existente (el backend lo comprime automáticamente al guardarlo).
 - **Capacitación**: cursos con progreso simulado y una sección de **videos de
   capacitación** — al seleccionar un video se reproduce en una ventana
   emergente (modal), soportando video subido a Drive, YouTube o URL directa.
@@ -33,8 +42,14 @@ de usuarios**.
   ya existente.
 - **Sheets & Roles**: configuración de la sincronización con Sheets, reglas de
   validación de captura, **Mi Cuenta** (cualquier usuario puede cambiar su
-  nombre y contraseña) y **Gestión de Usuarios** (Admin Tech crea, edita rol/
-  nivel, restablece contraseña o elimina usuarios).
+  nombre y contraseña) y **Gestión de Usuarios** (Admin Tech crea usuarios,
+  edita rol/nivel, restablece contraseña, elimina usuarios y controla, por
+  usuario: **a qué módulos tiene acceso** en el menú — Dashboard, Instructivos,
+  Capacitación, Gestión de Casos — y si está **autorizado para descargar**
+  instructivos/controladores).
+- **Contraste claro/oscuro**: botón (ícono de sol/luna) en el header y en la
+  pantalla de inicio de sesión que alterna el tema; la preferencia se guarda
+  en el navegador de cada usuario.
 
 ## Credenciales por defecto (¡cámbialas de inmediato!)
 
@@ -167,3 +182,14 @@ el scope de Drive en el manifiesto, o `appsscript.json` no incluye el bloque
 - El campo "Google Spreadsheet ID" que se ve en Configuración es informativo;
   la app siempre usa la hoja definida en la constante `SPREADSHEET_ID` de
   `Code.gs`.
+- El **acceso por módulo** (qué pestañas ve cada usuario) oculta las pestañas
+  en el menú y evita entrar a ellas desde la interfaz; la autorización de
+  **descarga** sí se valida también en el servidor (`downloadManual`
+  rechaza la petición si el usuario no está autorizado), igual que todas las
+  acciones de administrador (crear/editar/eliminar contenido y usuarios, que
+  ya estaban protegidas por rol). Sigue siendo una herramienta interna: no
+  hay una capa de permisos por fila en la hoja de cálculo en sí.
+- Vincular un archivo de Drive existente como **controlador** descarga su
+  contenido, lo comprime y sube una copia nueva a la carpeta del portal —
+  para archivos grandes esto puede tardar más que solo compartir el enlace
+  original.
