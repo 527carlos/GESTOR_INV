@@ -85,15 +85,20 @@ aplicación.
 
 1. Ve a [script.google.com](https://script.google.com) y crea un **proyecto
    nuevo** (standalone), o usa `clasp` si prefieres línea de comandos.
-2. Copia el contenido de `appsscript.json`, `Code.gs` e `Index.html` de esta
-   carpeta a los archivos correspondientes del proyecto de Apps Script
-   (`Code.gs` e `Index.html` deben llamarse exactamente así).
+2. Copia el contenido de `Code.gs` e `Index.html` de esta carpeta a los
+   archivos correspondientes del proyecto de Apps Script (deben llamarse
+   exactamente así). Para copiar `appsscript.json`, primero actívalo: en el
+   editor ve a **⚙️ Configuración del proyecto** y marca "Mostrar el archivo
+   de manifiesto 'appsscript.json' en el editor"; luego reemplaza su
+   contenido con el de este repositorio (incluye los scopes de Sheets y
+   Drive que necesita el módulo de Contenido).
 3. Verifica que la constante `SPREADSHEET_ID` en `Code.gs` sea el ID de tu hoja
    de cálculo (ya viene configurado con el ID indicado).
 4. En el editor de Apps Script, selecciona la función `initializeSpreadsheet`
    y ejecútala una vez (botón ▶). La primera vez te pedirá autorizar el acceso
    a Google Sheets y Google Drive (necesario para subir instructivos,
-   controladores y videos). Esto crea las pestañas y siembra datos de ejemplo
+   controladores y videos): acepta el diálogo de permisos completo, sin
+   omitir el de Drive. Esto crea las pestañas y siembra datos de ejemplo
    — solo rellena las tablas que estén vacías, así que es seguro volver a
    ejecutarla en cualquier momento.
 5. Despliega como aplicación web: **Implementar → Nueva implementación →
@@ -106,6 +111,36 @@ aplicación.
      Workspace). El acceso real a los datos lo sigue controlando el login.
 6. Abre la URL de la aplicación web, inicia sesión con `admin` / `admin123` y
    cambia la contraseña de inmediato desde Mi Cuenta.
+
+## Solución de problemas
+
+**`Exception: No tienes permiso para llamar a DriveApp.Folder.createFolder`
+(o cualquier método de `DriveApp`)**: el proyecto se autorizó antes de tener
+el scope de Drive en el manifiesto, o `appsscript.json` no incluye el bloque
+`oauthScopes` de este repositorio. Para corregirlo:
+
+1. Muestra el manifiesto (⚙️ Configuración del proyecto → "Mostrar el archivo
+   de manifiesto") y confirma que `appsscript.json` tiene:
+   ```json
+   "oauthScopes": [
+     "https://www.googleapis.com/auth/spreadsheets",
+     "https://www.googleapis.com/auth/drive"
+   ]
+   ```
+   Si no lo tiene, pégalo desde este repo y guarda.
+2. En el editor, selecciona la función `initializeSpreadsheet` (o cualquier
+   función) en el desplegable de funciones y ejecútala con ▶. Debe aparecer
+   un nuevo diálogo de autorización pidiendo acceso a Google Drive además de
+   Sheets — acéptalo completo.
+3. Si la app web sigue fallando después de autorizar en el editor, crea una
+   **nueva versión** de la implementación: Implementar → Gestionar
+   implementaciones → ✏️ (editar) → Versión: **Nueva versión** → Implementar.
+   Esto asegura que la app web publicada use la autorización más reciente.
+4. Si el error persiste, revisa que la cuenta con la que autorizaste sea la
+   misma configurada como "Ejecutar como" (**Yo**) en la implementación, y
+   que esa cuenta no tenga restricciones de administrador de Google
+   Workspace que bloqueen el scope `drive` para Apps Script (en ese caso, un
+   administrador del dominio debe aprobarlo en la consola de administración).
 
 ## Notas y limitaciones de seguridad
 
